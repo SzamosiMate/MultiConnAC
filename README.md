@@ -3,13 +3,6 @@
 
 ![License](https://img.shields.io/github/license/SzamosiMate/MultiConnAC) ![Issues](https://img.shields.io/github/issues/SzamosiMate/MultiConnAC) ![Forks](https://img.shields.io/github/forks/SzamosiMate/MultiConnAC) ![Stars](https://img.shields.io/github/stars/SzamosiMate/MultiConnAC)
 
-## Table of Contents
-
-- [About](#about)
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-
 ## About
 
 MultiConnAC is a connection object for ArchiCAD’s JSON API and its Python wrapper, designed to manage multiple open instances of ArchiCAD simultaneously
