@@ -2,6 +2,7 @@ import json
 from typing import Any
 from dataclasses import dataclass
 from archicad.connection import ACConnection   # type: ignore
+from archicad.commands import UnsucceededCommandCall
 import asyncio
 import aiohttp
 from port import Port
@@ -57,10 +58,15 @@ class ConnHeader:
         return instance
 
     def connect(self) -> None:
+        print('called')
         try:
             self.conn = ACConnection(self.port)
-            self.status = Status.ACTIVE
-        except ConnectionError:
+            print(f' conn is {self.conn}')
+            if type(self.conn) is ACConnection:
+                self.status = Status.ACTIVE
+            else:
+                self.status = Status.FAILED
+        except Exception:
             self.status = Status.FAILED
 
     def disconnect(self) -> None:

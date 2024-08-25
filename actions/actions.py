@@ -11,10 +11,6 @@ class Action(ABC):
     def __init__(self, multi_conn):
         self.multi_conn: MultiConn = multi_conn
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        ActionRegistry.register(cls)
-
     def from_ports(self, *args: Port) -> None:
         self.execute_action(
             [self.multi_conn.available_port_headers[port] for port in args if port in self.multi_conn.available_port_headers.keys()])
@@ -29,15 +25,4 @@ class Action(ABC):
     def execute_action(self, conn_headers: list[ConnHeader]) -> None:
         pass
 
-
-class ActionRegistry:
-    _registry: dict[str, Action] = {}
-
-    @classmethod
-    def register(cls, command_class):
-        cls._registry[command_class.__name__] = command_class
-
-    @classmethod
-    def get_commands(cls):
-        return cls._registry
 
