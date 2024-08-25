@@ -1,4 +1,4 @@
-from .actions import Action
+from .actions import Action, ActionRegistry
 from .connect import Connect
 from .connect_or_open import ConnectOrOpen
 from .disconnect import Disconnect
@@ -6,20 +6,9 @@ from .quit_and_disconnect import QuitAndDisconnect
 from .refresh import Refresh
 from .run_async import RunAsync
 
-__all__ = (
-    Action,
-    Connect,
-    ConnectOrOpen,
-    Disconnect,
-    QuitAndDisconnect,
-    Refresh,
-    RunAsync
+__all__: tuple[str, ...]  = (
+    'Action',
+    'ActionRegistry'
 )
 
-actions = {'connect': 'Connect',
-            'connect_or_open': 'ConnectOrOpen',
-            'disconnect': 'Disconnect',
-            'quit_and_disconnect': 'QuitAndDisconnect',
-            'refresh': 'Refresh',
-            'run_async': 'RunAsync'
-           }
+

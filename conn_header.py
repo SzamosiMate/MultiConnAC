@@ -1,9 +1,19 @@
 import json
 from typing import Any
 from dataclasses import dataclass
-from archicad.connection import ACConnection, create_request
+from archicad.connection import ACConnection   # type: ignore
 import asyncio
 import aiohttp
+from port import Port
+from enum import Enum, auto
+
+
+class Status(Enum):
+    PENDING: int = auto()
+    ACTIVE: int = auto()
+    FAILED: int = auto()
+    UNASSIGNED: int = auto()
+
 
 @dataclass
 class ProductInfo:
@@ -29,29 +39,35 @@ class APIResponseError:
 
 class ConnHeader:
 
-    base_url = "http://127.0.0.1"
+    base_url: str = "http://127.0.0.1"
 
-    def __init__(self, port: int, initialize: bool = True):
-        self.port: int = port
+    def __init__(self, port: Port, initialize: bool = True):
+        self.port: Port = port
+        self.status: Status = Status.PENDING
         self.conn: ACConnection | None = None
         if initialize:
             self.ProductInfo: ProductInfo | APIResponseError = asyncio.run(self.get_product_info())
             self.ArchiCadID: ArchiCadID | APIResponseError = asyncio.run(self.get_archicad_id())
 
-    def connect(self) -> None:
-        self.conn = ACConnection(self.port)
-
-    def disconnect(self) -> None:
-        self.conn = None
-
     @classmethod
-    async def async_init(cls, port: int):
+    async def async_init(cls, port: Port):
         instance = cls(port, initialize=False)
         instance.ProductInfo = await instance.get_product_info()
         instance.ArchiCadID = await instance.get_archicad_id()
         return instance
 
-    async def post_command(self, port: int, json_str: str) -> dict[str, Any]:
+    def connect(self) -> None:
+        try:
+            self.conn = ACConnection(self.port)
+            self.status = Status.ACTIVE
+        except ConnectionError:
+            self.status = Status.FAILED
+
+    def disconnect(self) -> None:
+        self.conn = None
+        self.status = Status.PENDING
+
+    async def post_command(self, port: Port, json_str: str) -> dict[str, Any]:
         url = f"{self.base_url}:{port}"
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=json.loads(json_str)) as response:

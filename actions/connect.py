@@ -8,5 +8,3 @@ class Connect(Action):
             print(f'connecting {conn_header.ProductInfo}')
             if type(conn_header.ProductInfo) is ProductInfo:
                 conn_header.connect()
-                self.multi_conn.active[conn_header.port] = conn_header
-                self.multi_conn.inactive.pop(conn_header.port)
