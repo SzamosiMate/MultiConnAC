@@ -2,7 +2,7 @@ import json
 from typing import Any
 from dataclasses import dataclass
 from archicad.connection import ACConnection   # type: ignore
-from archicad.commands import UnsucceededCommandCall
+from archicad.releases import Commands, Types, Utilities
 import asyncio
 import aiohttp
 from port import Port
@@ -90,9 +90,10 @@ class ConnHeader:
             return APIResponseError(code=result['error']['code'],
                                     message=result['error']['message'])
 
-    @staticmethod
-    async def create_json_get_archicad_id() -> str:
-        return json.dumps({
+    async def get_archicad_id(self) -> ArchiCadID | APIResponseError:
+
+        async def create_json_get_archicad_id() -> str:
+            return json.dumps({
                 "command": "API.ExecuteAddOnCommand",
                 "parameters": {
                     "addOnCommandId": {
@@ -102,24 +103,22 @@ class ConnHeader:
                 }
             })
 
-    @staticmethod
-    async def create_archicad_id(result) -> ArchiCadID:
-        addon_command_response = result['result']['addOnCommandResponse']
-        if addon_command_response['isUntitled']:
-            return ArchiCadID(isUntitled=addon_command_response['isUntitled'],
-                              isTeamwork=addon_command_response['isTeamwork'])
-        else:
-            return ArchiCadID(isUntitled=addon_command_response['isUntitled'],
-                              isTeamwork=addon_command_response['isTeamwork'],
-                              projectLocation=addon_command_response['projectLocation'],
-                              projectPath=addon_command_response['projectPath'],
-                              projectName=addon_command_response['projectName'])
+        async def create_archicad_id() -> ArchiCadID:
+            addon_command_response = result['result']['addOnCommandResponse']
+            if addon_command_response['isUntitled']:
+                return ArchiCadID(isUntitled=addon_command_response['isUntitled'],
+                                  isTeamwork=addon_command_response['isTeamwork'])
+            else:
+                return ArchiCadID(isUntitled=addon_command_response['isUntitled'],
+                                  isTeamwork=addon_command_response['isTeamwork'],
+                                  projectLocation=addon_command_response['projectLocation'],
+                                  projectPath=addon_command_response['projectPath'],
+                                  projectName=addon_command_response['projectName'])
 
-    async def get_archicad_id(self) -> ArchiCadID | APIResponseError:
-        json_str = await self.create_json_get_archicad_id()
+        json_str = await create_json_get_archicad_id()
         result = await self.post_command(self.port, json_str)
         if result["succeeded"]:
-            return await self.create_archicad_id(result)
+            return await create_archicad_id()
         else:
             return APIResponseError(code=result['error']['code'],
                                     message=result['error']['message'])

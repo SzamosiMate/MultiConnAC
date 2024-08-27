@@ -7,3 +7,6 @@ class Connect(Action):
         for conn_header in conn_headers:
             print(f'connecting {conn_header.ProductInfo}')
             conn_header.connect()
+
+    def failed(self) -> None:
+        self.execute_action(list(self.multi_conn.failed.values()))

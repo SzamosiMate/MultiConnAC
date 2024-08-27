@@ -13,13 +13,13 @@ class Action(ABC):
 
     def from_ports(self, *args: Port) -> None:
         self.execute_action(
-            [self.multi_conn.available_port_headers[port] for port in args if port in self.multi_conn.available_port_headers.keys()])
+            [self.multi_conn.open_port_headers[port] for port in args if port in self.multi_conn.open_port_headers.keys()])
 
     def from_headers(self, *args: ConnHeader) -> None:
         self.execute_action([*args])
 
     def all(self) -> None:
-        self.execute_action(list(self.multi_conn.available_port_headers.values()))
+        self.execute_action(list(self.multi_conn.open_port_headers.values()))
 
     @abstractmethod
     def execute_action(self, conn_headers: list[ConnHeader]) -> None:
