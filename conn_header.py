@@ -1,13 +1,11 @@
 import json
 from typing import Any
 from dataclasses import dataclass
-from archicad.connection import ACConnection   # type: ignore
-from archicad.releases import Commands, Types, Utilities
 import asyncio
 import aiohttp
-from port import Port
 from enum import Enum, auto
-
+from port import Port
+from connection_builder import ConnectionBuilder
 
 class Status(Enum):
     PENDING: int = auto()
@@ -45,7 +43,10 @@ class ConnHeader:
     def __init__(self, port: Port, initialize: bool = True):
         self.port: Port = port
         self.status: Status = Status.PENDING
-        self.conn: ACConnection | None = None
+        self.types = ConnectionBuilder.base_types
+        self.commands = ConnectionBuilder.base_commands
+        self.utilities = ConnectionBuilder.base_utilities
+
         if initialize:
             self.ProductInfo: ProductInfo | APIResponseError = asyncio.run(self.get_product_info())
             self.ArchiCadID: ArchiCadID | APIResponseError = asyncio.run(self.get_archicad_id())
@@ -58,19 +59,29 @@ class ConnHeader:
         return instance
 
     def connect(self) -> None:
-        print('called')
-        try:
-            self.conn = ACConnection(self.port)
-            print(f' conn is {self.conn}')
-            if type(self.conn) is ACConnection:
-                self.status = Status.ACTIVE
-            else:
-                self.status = Status.FAILED
-        except Exception:
+
+        def build_connection() -> None:
+            c_builder = ConnectionBuilder(self.port, self.ProductInfo)
+            print(f' the type of commands before: {type(self.commands)}')
+            print(f' the type of cb before: {type(c_builder)}')
+            self.types = c_builder.types
+            self.commands = c_builder.commands
+            self.utilities = c_builder.utilities
+            print(f' the type of commands after: {type(self.commands)}')
+            print(f'c_builder.commands: {c_builder.commands}')
+
+        if isinstance(self.ProductInfo, APIResponseError) :
+            self.ProductInfo = asyncio.run(self.get_product_info())
+        if isinstance(self.ProductInfo, ProductInfo):
+            build_connection()
+            self.status = Status.ACTIVE
+        else:
             self.status = Status.FAILED
 
     def disconnect(self) -> None:
-        self.conn = None
+        self.types = ConnectionBuilder.base_types
+        self.commands = ConnectionBuilder.base_commands
+        self.utilities = ConnectionBuilder.base_utilities
         self.status = Status.PENDING
 
     async def post_command(self, port: Port, json_str: str) -> dict[str, Any]:

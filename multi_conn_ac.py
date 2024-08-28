@@ -40,9 +40,9 @@ class MultiConn:
         if port not in self.open_port_headers.keys():
             self.open_port_headers[port] = await ConnHeader.async_init(port)
         else:
-            if self.open_port_headers[port].ProductInfo is APIResponseError:
+            if isinstance(self.open_port_headers[port].ProductInfo, APIResponseError):
                 await self.open_port_headers[port].get_product_info()
-            if self.open_port_headers[port].ArchiCadID is APIResponseError:
+            if isinstance(self.open_port_headers[port].ArchiCadID, APIResponseError):
                 await self.open_port_headers[port].get_archicad_id()
 
     async def close_if_open(self, port: Port) -> None:
@@ -73,12 +73,12 @@ class MultiConn:
 if __name__ == "__main__":
     conn = MultiConn()
 
-    conn.open_port_headers[Port(19723)].port = Port(19727)
     conn.connect.all()
     print(conn.active)
     print(conn.failed)
     print(conn.pending)
-    conn.open_port_headers[Port(19723)].port = Port(19723)
+    port_header = conn.open_port_headers[Port(19723)]
+    print(port_header.commands.GetAllElements())
     conn.connect.failed()
     print(conn.active)
     print(conn.failed)
