@@ -6,18 +6,17 @@ import aiohttp
 
 
 class MultiConn:
-    base_url: str = "http://127.0.0.1"
-    port_range: range = range(19723, 19744)
+    _base_url: str = "http://127.0.0.1"
+    _port_range: range = range(19723, 19744)
 
     def __init__(self):
         self.open_port_headers: dict[Port, ConnHeader] = {}
         self.refresh()
         # load actions
         self.connect: Connect = Connect(self)
-        self.connect_or_open: ConnectOrOpen = ConnectOrOpen(self)
         self.disconnect: Disconnect = Disconnect(self)
-        self.quit_and_disconnect: QuitAndDisconnect = QuitAndDisconnect(self)
-        self.run_async: RunAsync = RunAsync(self)
+        self.run_command: RunCommand = RunCommand(self)
+
 
     @property
     def pending(self) -> dict[Port, ConnHeader]:
@@ -50,7 +49,7 @@ class MultiConn:
             self.open_port_headers.pop(port)
 
     async def check_port(self, session: aiohttp.ClientSession, port: Port) -> None:
-        url = f"{self.base_url}:{port}"
+        url = f"{self._base_url}:{port}"
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=1)) as response:
                 if response.status == 200:
@@ -63,26 +62,15 @@ class MultiConn:
 
     async def scan_ports(self) -> None:
         async with aiohttp.ClientSession() as session:
-            tasks = [self.check_port(session, Port(port)) for port in self.port_range]
+            tasks = [self.check_port(session, Port(port)) for port in self._port_range]
             await asyncio.gather(*tasks)
 
     def refresh(self) -> None:
         asyncio.run(self.scan_ports())
 
 
-if __name__ == "__main__":
-    conn = MultiConn()
 
-    conn.connect.all()
-    print(conn.active)
-    print(conn.failed)
-    print(conn.pending)
-    port_header = conn.open_port_headers[Port(19723)]
-    print(port_header.commands.GetAllElements())
-    conn.connect.failed()
-    print(conn.active)
-    print(conn.failed)
-    print(conn.pending)
+
 
 
 

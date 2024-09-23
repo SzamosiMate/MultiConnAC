@@ -4,7 +4,7 @@ from .connect_or_open import ConnectOrOpen
 from .disconnect import Disconnect
 from .quit_and_disconnect import QuitAndDisconnect
 from .refresh import Refresh
-from .run_async import RunAsync
+from .run_command import RunCommand
 
 __all__: tuple[str, ...]  = (
     'Action',
@@ -13,7 +13,7 @@ __all__: tuple[str, ...]  = (
     'Disconnect',
     'QuitAndDisconnect',
     'Refresh',
-    'RunAsync'
+    'RunCommand'
 )
 
 
