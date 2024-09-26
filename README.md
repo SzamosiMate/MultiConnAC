@@ -24,12 +24,13 @@ Disclaimer:
 The connection object is functional but still in the early stages of development. It is currently untested, and its interfaces may change in future updates.
 
 Run command on all windows using the official python package
+
 ```python 
     conn = MultiConn()
-    conn.connect.all()
+conn.connect.all()
 
-    for conn_header in conn.open_port_headers.values():
-        print(conn_header.ac.commands.GetAllElements())
+for conn_header in conn.open_port_headers.values():
+    print(conn_header.archicad.commands.GetAllElements())
 ```
 Run command on all windows using basic helper functions
 ```python 

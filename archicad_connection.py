@@ -1,8 +1,9 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
+from port import Port
 if TYPE_CHECKING:
     from conn_header import ProductInfo
-    from port import Port
+
 
 from archicad.versioning import _Versioning
 from archicad.connection import create_request
@@ -14,7 +15,7 @@ class ArchiCADConnection:
     commands = Commands
     utilities = Utilities
 
-    def __init__(self, port: Port):
+    def __init__(self, port: Port = Port(19723)):
         self._request = create_request(int(port))
 
     def connect(self, product_info: ProductInfo) -> None:

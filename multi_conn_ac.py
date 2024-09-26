@@ -3,6 +3,8 @@ from port import Port
 from actions import *
 import asyncio
 import aiohttp
+from typing import Callable, Any
+from types import MethodType
 
 
 class MultiConn:
@@ -12,10 +14,14 @@ class MultiConn:
     def __init__(self):
         self.open_port_headers: dict[Port, ConnHeader] = {}
         self.refresh()
+
+        # load command namespaces for IDE typehints. Replaced at runtime.
+        self.core = CoreCommands()
+        self.archicad = ArchiCADConnection()
+
         # load actions
         self.connect: Connect = Connect(self)
         self.disconnect: Disconnect = Disconnect(self)
-        self.run_command: RunCommand = RunCommand(self)
 
 
     @property
@@ -35,18 +41,19 @@ class MultiConn:
                 for conn_header in self.open_port_headers.values()
                 if conn_header.status == status}
 
-    async def create_or_refresh_connection(self, port: Port) -> None:
-        if port not in self.open_port_headers.keys():
-            self.open_port_headers[port] = await ConnHeader.async_init(port)
+    def __getattribute__(self, attribute):
+        if attribute in ["core", "archicad"]:
+            return MultiConnProxy(self, [attribute])
         else:
-            if isinstance(self.open_port_headers[port].ProductInfo, APIResponseError):
-                await self.open_port_headers[port].get_product_info()
-            if isinstance(self.open_port_headers[port].ArchiCadID, APIResponseError):
-                await self.open_port_headers[port].get_archicad_id()
+            return super().__getattribute__(attribute)
 
-    async def close_if_open(self, port: Port) -> None:
-        if port in self.open_port_headers.keys():
-            self.open_port_headers.pop(port)
+    def refresh(self) -> None:
+        asyncio.run(self.scan_ports())
+
+    async def scan_ports(self) -> None:
+        async with aiohttp.ClientSession() as session:
+            tasks = [self.check_port(session, Port(port)) for port in self._port_range]
+            await asyncio.gather(*tasks)
 
     async def check_port(self, session: aiohttp.ClientSession, port: Port) -> None:
         url = f"{self._base_url}:{port}"
@@ -60,16 +67,84 @@ class MultiConn:
             await self.close_if_open(port)
             print(f"Port {port} is raises exception")
 
-    async def scan_ports(self) -> None:
-        async with aiohttp.ClientSession() as session:
-            tasks = [self.check_port(session, Port(port)) for port in self._port_range]
-            await asyncio.gather(*tasks)
+    async def create_or_refresh_connection(self, port: Port) -> None:
+        if port not in self.open_port_headers.keys():
+            self.open_port_headers[port] = await ConnHeader.async_init(port)
+        else:
+            if isinstance(self.open_port_headers[port].ProductInfo, APIResponseError):
+                await self.open_port_headers[port].get_product_info()
+            if isinstance(self.open_port_headers[port].ArchiCadID, APIResponseError):
+                await self.open_port_headers[port].get_archicad_id()
 
-    def refresh(self) -> None:
-        asyncio.run(self.scan_ports())
+    async def close_if_open(self, port: Port) -> None:
+        if port in self.open_port_headers.keys():
+            self.open_port_headers.pop(port)
 
 
+class MultiConnProxy:
+    """A proxy to alter the intercepted method call. It will call the same
+    method on all active ConnHeaders of the parent, with the provided attribute path"""
 
+    def __init__(self, parent: MultiConn, attribute: list[str]):
+        self.parent: MultiConn = parent
+        self._attr_path: list[str] = attribute
+
+    def __getattr__(self, item):
+        """Capture further attribute accesses and extend the path."""
+        self._attr_path.append(item)
+        return self
+
+    def __call__(self, *args, **kwargs):
+        """When the chain ends with a callable, trigger `run_on_all_active`."""
+        return self._run_on_all_active(self._attr_path, *args, **kwargs)
+
+    def _run_on_all_active(self, attribute_path: list[str], *args, **kwargs) -> dict[Port, Any]:
+        """Calls the same method on all active connections based on the attribute path.
+        Args and kwargs with a 'port' key will be passed individually per port."""
+        results = {}
+        for port, conn_header in self.parent.active.items():
+            function_to_run = self._get_bound_method_at_attribute_path(conn_header, attribute_path)
+
+            port_args = self._get_port_specific_args(port, args)
+            port_kwargs = self._get_port_specific_kwargs(port, kwargs)
+
+            # Call the method with port-specific args and kwargs
+            result = function_to_run(*port_args, **port_kwargs)
+            results.update({port: result})
+        return results
+
+    @staticmethod
+    def _get_bound_method_at_attribute_path(current_object: object, attribute_path: list[str]) -> Callable:
+        assert len(attribute_path) > 0
+        for attr in attribute_path:
+            if not hasattr(current_object, attr):
+                raise AttributeError(f"'{current_object.__class__.__name__}' object has no attribute '{attr}'")
+            previous_object = current_object
+            current_object = getattr(current_object, attr)
+        # bind current_object (method) to previous_object instance
+        return current_object.__get__(previous_object)
+
+    @staticmethod
+    def _get_port_specific_args(port: Port, args: tuple) -> list:
+        """Extract args that are specific to the given port."""
+        port_args = []
+        for arg in args:
+            if isinstance(arg, dict) and port in arg:
+                port_args.append(arg[port])
+            else:
+                port_args.append(arg)  # If no port key, use the original argument
+        return port_args
+
+    @staticmethod
+    def _get_port_specific_kwargs(port: Port, kwargs: dict) -> dict:
+        """Extract kwargs that are specific to the given port."""
+        port_kwargs = {}
+        for key, value in kwargs.items():
+            if isinstance(value, dict) and port in value:
+                port_kwargs[key] = value[port]
+            else:
+                port_kwargs[key] = value  # If no port key, use the original keyword argument
+        return port_kwargs
 
 
 

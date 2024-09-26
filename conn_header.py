@@ -18,7 +18,7 @@ class ConnHeader:
         self.port: Port = port
         self.status: Status = Status.PENDING
         self.core = CoreCommands(self.port)
-        self.ac = ArchiCADConnection(self.port)
+        self.archicad = ArchiCADConnection(self.port)
 
         if initialize:
             self.ProductInfo: ProductInfo | APIResponseError = asyncio.run(self.get_product_info())
@@ -35,13 +35,13 @@ class ConnHeader:
         if isinstance(self.ProductInfo, APIResponseError):
             self.ProductInfo = asyncio.run(self.get_product_info())
         if isinstance(self.ProductInfo, ProductInfo):
-            self.ac.connect(self.ProductInfo)
+            self.archicad.connect(self.ProductInfo)
             self.status = Status.ACTIVE
         else:
             self.status = Status.FAILED
 
     def disconnect(self) -> None:
-        self.ac.disconnect()
+        self.archicad.disconnect()
         self.status = Status.PENDING
 
     async def get_product_info(self) -> ProductInfo | APIResponseError:
