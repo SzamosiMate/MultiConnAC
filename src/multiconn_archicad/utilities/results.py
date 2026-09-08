@@ -7,10 +7,6 @@ from typing import Any, Generic, Optional, TypeVar
 from multiconn_archicad.models.official import types as official
 from multiconn_archicad.models.tapir import types as tapir
 
-T = TypeVar("T")
-U = TypeVar("U")
-ErrorType = tapir.Error | official.Error
-
 ERROR_CONTAINER_MODELS = (
     tapir.FailedExecutionResult,
     tapir.ErrorItem,
@@ -18,6 +14,10 @@ ERROR_CONTAINER_MODELS = (
     official.ErrorItem,
 )
 
+T = TypeVar("T")
+U = TypeVar("U")
+ErrorType = tapir.Error | official.Error
+ErrorContainers = ERROR_CONTAINER_MODELS
 
 def extract_error(item: Any) -> Optional[ErrorType]:
     """Extract an Archicad API Error instance from typed response items."""
@@ -79,12 +79,12 @@ class BatchResult(Generic[T]):
 
     Guarantees:
     - len(items) == len(input_items)
-    - Failed indices are mapped in `errors[batch_idx]` and omitted from `successes`.
+    - Failed indices contain their raw Error model in `items` and are mapped in `errors[batch_idx]`.
     - Multiple errors occurring on the same batch index are preserved in `errors[batch_idx]`.
     - Truthiness evaluates to True only when all operations succeeded (is_all_success).
     """
 
-    items: Sequence[T | None]
+    items: Sequence[T | ErrorContainers]
     errors: Mapping[int, tuple[BatchError, ...]] = field(default_factory=dict)
 
     @property
@@ -110,7 +110,7 @@ class BatchResult(Generic[T]):
     @property
     def successes(self) -> list[T]:
         """Returns only the items that had zero errors anywhere in their evaluation."""
-        return [item for idx, item in enumerate(self.items) if idx not in self.errors and item is not None]
+        return [item for idx, item in enumerate(self.items) if idx not in self.errors]
 
     def _validate_alignment(self, parameters: Sequence[Any]) -> None:
         """Ensures the external parameter sequence aligns 1:1 with the result items."""
@@ -148,9 +148,9 @@ class BatchResult(Generic[T]):
         )
         raise BatchOperationError(msg, result=self)
 
-    def items_or(self, fallback: T) -> list[T]:
-        """Returns items with None values replaced by a fallback default."""
-        return [fallback if item is None else item for item in self.items]
+    def items_or(self, fallback: U = None) -> list[T | U]:
+        """Lazy padded representation: returns items with top-level failures replaced by `fallback`."""
+        return [fallback if idx in self.errors else item for idx, item in enumerate(self.items)]
 
     def __bool__(self) -> bool:
         """Falsy if partial or total batch failure occurred."""
@@ -161,8 +161,9 @@ class BatchResult(Generic[T]):
             return "empty"
         sample = self.successes[0] if self.successes else None
         if sample is None:
-            for it in self.items:
-                if it is not None:
+            # Fall back to first non-error item in items
+            for idx, it in enumerate(self.items):
+                if idx not in self.errors:
                     return type(it).__name__
             return "Unknown"
         return type(sample).__name__
@@ -224,10 +225,10 @@ class BatchResult(Generic[T]):
             batch_idx = err.indices[0] if err.indices else 0
             error_map.setdefault(batch_idx, []).append(err)
 
-        items: list[T | None] = []
+        items: list[T | ErrorContainers] = []
         for idx, raw_item in enumerate(raw_items):
             if idx in error_map and extract_error(raw_item) is not None:
-                items.append(None)
+                items.append(raw_item)
             else:
                 items.append(accessor(raw_item) if accessor is not None else raw_item)
 

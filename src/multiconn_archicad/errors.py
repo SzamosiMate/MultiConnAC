@@ -1,4 +1,11 @@
 # Base Exception
+from __future__ import annotations
+
+from typing import Any
+
+from multiconn_archicad.utilities.results import BatchResult
+
+
 class MulticonnArchicadError(Exception):
     """Base class for all custom exceptions in the multiconn_archicad package."""
 
@@ -112,3 +119,11 @@ class NotFullyInitializedError(MulticonnArchicadError):
     """Raised when an operation is attempted on an object not fully initialized."""
 
     pass
+
+
+class BatchOperationError(MulticonnArchicadError):
+    """Raised by fail-fast utility functions when one or more batch items fail."""
+
+    def __init__(self, message: str, result: BatchResult[Any]):
+        super().__init__(message)
+        self.result = result

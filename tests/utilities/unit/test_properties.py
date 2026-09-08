@@ -44,9 +44,10 @@ def mock_api():
 
 def test_resolve_property_ids_result_success_and_error(mock_api):
     guid = uuid.uuid4()
+    err_item = official.ErrorItem(error=official.Error(code=1, message="Property not found"))
     mock_api.official.property.get_property_ids.return_value = [
         official.PropertyIdArrayItem(propertyId=official.PropertyId(guid=guid)),
-        official.ErrorItem(error=official.Error(code=1, message="Property not found")),
+        err_item,
     ]
 
     result = resolve_property_ids_result(mock_api, [("Dimensions", "Height"), ("Non", "Existent")])
@@ -55,7 +56,7 @@ def test_resolve_property_ids_result_success_and_error(mock_api):
     assert result.has_errors is True
     assert len(result.items) == 2
     assert result.items[0] == tapir.PropertyIdArrayItem(propertyId=tapir.PropertyId(guid=guid))
-    assert result.items[1] is None
+    assert result.items[1] == err_item
     assert result.errors[1][0].code == 1
     assert result.errors[1][0].path == "propertyIds[1]"
 
@@ -131,16 +132,17 @@ def test_get_property_values_per_element_result_success(mock_api):
 
 def test_get_property_values_per_element_result_inner_property_error(mock_api):
     elem1 = uuid.uuid4()
+    err_item = tapir.ErrorItem(error=tapir.Error(code=2, message="Not evaluated"))
     mock_api.tapir.property.get_property_values_of_elements.return_value = [
         tapir.PropertyValuesArrayItem(propertyValues=[
             tapir.PropertyValueArrayItem(propertyValue=tapir.PropertyValue(value="Wall-01")),
-            tapir.ErrorItem(error=tapir.Error(code=2, message="Not evaluated")),
+            err_item,
         ]),
     ]
 
     res = get_property_values_per_element_result(mock_api, [elem1], [uuid.uuid4(), uuid.uuid4()])
     assert res.is_all_success is False
-    assert res.items[0] == ["Wall-01", None]  # Partial row retained for diagnostics
+    assert res.items[0] == ["Wall-01", err_item]  # Raw ErrorItem retained inside the row
     assert res.errors[0][0].code == 2
     assert res.errors[0][0].message == "Not evaluated"
     assert res.errors[0][0].path == "elements[0].propertyValues[1]"
@@ -212,17 +214,18 @@ def test_set_property_values_per_element_result_and_masking(mock_api):
     props = [uuid.uuid4()]
     matrix = [["V1"], ["V2"]]
 
-    mock_api.tapir.property.set_property_values_of_elements.return_value = MagicMock(
-        executionResults=[
-            tapir.SuccessfulExecutionResult(success=True),
-            tapir.FailedExecutionResult(success=False, error=tapir.Error(code=500, message="Locked")),
-        ]
-    )
+    err_exec = tapir.FailedExecutionResult(success=False, error=tapir.Error(code=500, message="Locked"))
+    # Mock returns the unwrapped list directly
+    mock_api.tapir.property.set_property_values_of_elements.return_value = [
+        tapir.SuccessfulExecutionResult(success=True),
+        err_exec,
+    ]
 
     res = set_property_values_per_element_result(mock_api, elems, props, matrix)
 
     assert res.is_all_success is False
     assert len(res.items) == 2
+    assert res.items[1] == err_exec
     assert res.errors[1][0].code == 500
     assert res.errors[1][0].path == "executionResults[1]"
 
@@ -238,12 +241,11 @@ def test_set_property_values_per_element_fail_fast_success(mock_api):
     props = [uuid.uuid4(), uuid.uuid4()]
     matrix = [["V1", "V2"]]
 
-    mock_api.tapir.property.set_property_values_of_elements.return_value = MagicMock(
-        executionResults=[
-            tapir.SuccessfulExecutionResult(success=True),
-            tapir.SuccessfulExecutionResult(success=True),
-        ]
-    )
+    # Mock returns the unwrapped list directly
+    mock_api.tapir.property.set_property_values_of_elements.return_value = [
+        tapir.SuccessfulExecutionResult(success=True),
+        tapir.SuccessfulExecutionResult(success=True),
+    ]
 
     count = set_property_values_per_element(mock_api, elems, props, matrix)
     assert count == 2
@@ -254,11 +256,9 @@ def test_set_property_values_per_element_fail_fast_raises(mock_api):
     props = [uuid.uuid4()]
     matrix = [["V1"]]
 
-    mock_api.tapir.property.set_property_values_of_elements.return_value = MagicMock(
-        executionResults=[
-            tapir.FailedExecutionResult(success=False, error=tapir.Error(code=500, message="Locked")),
-        ]
-    )
+    mock_api.tapir.property.set_property_values_of_elements.return_value = [
+        tapir.FailedExecutionResult(success=False, error=tapir.Error(code=500, message="Locked")),
+    ]
 
     with pytest.raises(BatchOperationError) as exc_info:
         set_property_values_per_element(mock_api, elems, props, matrix)
@@ -269,9 +269,10 @@ def test_set_property_values_per_element_fail_fast_raises(mock_api):
 def test_set_flat_property_values_fail_fast(mock_api):
     elems = [uuid.uuid4()]
     prop = uuid.uuid4()
-    mock_api.tapir.property.set_property_values_of_elements.return_value = MagicMock(
-        executionResults=[tapir.SuccessfulExecutionResult(success=True)]
-    )
+    # Mock returns the unwrapped list directly
+    mock_api.tapir.property.set_property_values_of_elements.return_value = [
+        tapir.SuccessfulExecutionResult(success=True)
+    ]
 
     count = set_flat_property_values(mock_api, elems, prop, ["NewVal"])
     assert count == 1
@@ -285,8 +286,9 @@ def test_set_flat_property_values_fail_fast(mock_api):
 def test_get_property_details_and_result(mock_api):
     prop = uuid.uuid4()
     mock_prop_def = MagicMock(type="string", description="Test string")
+    # Mock returns unwrapped PropertyDefinition directly
     mock_api.official.property.get_details_of_properties.return_value = [
-        MagicMock(propertyDefinition=mock_prop_def),
+        mock_prop_def,
     ]
 
     res = get_property_details_result(mock_api, [prop])
@@ -301,9 +303,10 @@ def test_get_property_types_and_result(mock_api):
     mock_prop_def_1 = MagicMock(type="string")
     mock_prop_def_2 = MagicMock(type="integer")
 
+    # Mock returns unwrapped PropertyDefinitions directly
     mock_api.official.property.get_details_of_properties.return_value = [
-        MagicMock(propertyDefinition=mock_prop_def_1),
-        MagicMock(propertyDefinition=mock_prop_def_2),
+        mock_prop_def_1,
+        mock_prop_def_2,
     ]
 
     res = get_property_types_result(mock_api, [prop1, prop2])

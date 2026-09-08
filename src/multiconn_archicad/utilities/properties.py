@@ -23,18 +23,24 @@ from multiconn_archicad.utilities.results import BatchResult
 # ==============================================================================
 
 
-def _unwrap_val(item: Any) -> Any | None:
-    pv = getattr(item, "propertyValue", None)
-    return getattr(pv, "value", None) if pv is not None else None
+def _extract_property_values(element: tapir.PropertyValuesArrayItem) -> list[str | tapir.ErrorItem]:
+    """Extracts string property values, preserving inner ErrorItems on failure."""
+    return [
+        p.propertyValue.value if isinstance(p, tapir.PropertyValueArrayItem) else p
+        for p in getattr(element, "propertyValues", [])
+    ]
+
+
+def _get_raw_property_values(
+    api: UnifiedApi, elements: Sequence[ElementIdLike], properties: Sequence[PropertyIdLike]
+) -> list[tapir.ErrorItem | tapir.PropertyValuesArrayItem]:
+    return api.tapir.property.get_property_values_of_elements(
+        normalize_element_ids(elements), normalize_property_ids(properties)
+    )
 
 
 def _to_prop_value(val: Any) -> tapir.PropertyValue:
     return val if isinstance(val, tapir.PropertyValue) else tapir.PropertyValue(value="" if val is None else str(val))
-
-
-def _extract_type_name(item: Any) -> str:
-    prop_def = getattr(item, "propertyDefinition", item)
-    return str(getattr(prop_def, "type", ""))
 
 
 # ==============================================================================
@@ -47,8 +53,7 @@ def resolve_property_ids_result(
 ) -> BatchResult[tapir.PropertyIdArrayItem]:
     """Diagnostic batch lookup returning a BatchResult container."""
     raw = api.official.property.get_property_ids([normalize_property_user_id(uid) for uid in property_user_ids])
-    items = getattr(raw, "propertyIds", raw)
-    return BatchResult.from_items(items, accessor=normalize_property_id, root_key="propertyIds")
+    return BatchResult.from_items(raw, accessor=normalize_property_id, root_key="propertyIds")
 
 
 def resolve_property_ids(
@@ -74,46 +79,44 @@ def resolve_property_id(
 
 def get_property_values_per_element_result(
     api: UnifiedApi, elements: Sequence[ElementIdLike], properties: Sequence[PropertyIdLike]
-) -> BatchResult[list[Any | None]]:
+) -> BatchResult[list[str]]:
     """Diagnostic N x M matrix read returning a BatchResult container."""
-    raw = api.tapir.property.get_property_values_of_elements(
-        normalize_element_ids(elements), normalize_property_ids(properties)
-    )
-    items = getattr(raw, "propertyValuesForElements", raw)
+    items = _get_raw_property_values(api, elements, properties)
     return BatchResult.from_items(
         items,
-        accessor=lambda el: [_unwrap_val(p) for p in getattr(el, "propertyValues", [])],
+        accessor=_extract_property_values,
         root_key="elements",
     )
 
 
 def get_property_values_per_element(
     api: UnifiedApi, elements: Sequence[ElementIdLike], properties: Sequence[PropertyIdLike]
-) -> list[list[Any | None]]:
+) -> list[list[str]]:
     """Fail-fast N x M matrix read returning clean Python primitives."""
     res = get_property_values_per_element_result(api, elements, properties)
     res.raise_for_errors("Batch property values read")
-    return [row for row in res.items if row is not None]
+    return res.successes
 
 
 def get_flat_property_values_result(
     api: UnifiedApi, elements: Sequence[ElementIdLike], property_id: PropertyIdLike
-) -> BatchResult[Any | None]:
+) -> BatchResult[str]:
     """Diagnostic 1D read returning a BatchResult container."""
-    res = get_property_values_per_element_result(api, elements, [property_id])
-    return BatchResult(
-        items=[(row[0] if row is not None else None) for row in res.items],
-        errors=res.errors,
+    property_values = _get_raw_property_values(api, elements, [property_id])
+    return BatchResult.from_items(
+        property_values,
+        accessor=lambda el: _extract_property_values(el)[0],
+        root_key="elements",
     )
 
 
 def get_flat_property_values(
     api: UnifiedApi, elements: Sequence[ElementIdLike], property_id: PropertyIdLike
-) -> list[Any | None]:
+) -> list[str]:
     """Fail-fast 1D read returning a flat list of Python primitives."""
     res = get_flat_property_values_result(api, elements, property_id)
     res.raise_for_errors("Single property read")
-    return list(res.items)
+    return res.successes
 
 
 def get_property_values_dict_per_element_result(
@@ -121,15 +124,16 @@ def get_property_values_dict_per_element_result(
     elements: Sequence[ElementIdLike],
     properties: Sequence[PropertyIdLike],
     property_names: Optional[Sequence[str]] = None,
-) -> BatchResult[dict[str, Any | None]]:
+) -> BatchResult[dict[str, str | tapir.ErrorItem]]:
     """Diagnostic dictionary read returning a BatchResult container."""
     keys = (
         list(property_names) if property_names else [str(normalize_property_id(p).propertyId.guid) for p in properties]
     )
-    res = get_property_values_per_element_result(api, elements, properties)
-    return BatchResult(
-        items=[(dict(zip(keys, row)) if row is not None else None) for row in res.items],
-        errors=res.errors,
+    raw = _get_raw_property_values(api, elements, properties)
+    return BatchResult.from_items(
+        raw,
+        accessor=lambda el: dict(zip(keys, _extract_property_values(el))),
+        root_key="elements",
     )
 
 
@@ -138,11 +142,11 @@ def get_property_values_dict_per_element(
     elements: Sequence[ElementIdLike],
     properties: Sequence[PropertyIdLike],
     property_names: Optional[Sequence[str]] = None,
-) -> list[dict[str, Any | None]]:
+) -> list[dict[str, str]]:
     """Fail-fast dictionary read returning a list of property dictionaries."""
     res = get_property_values_dict_per_element_result(api, elements, properties, property_names)
     res.raise_for_errors("Property dictionary read")
-    return [row for row in res.items if row is not None]
+    return res.successes
 
 
 # ==============================================================================
@@ -190,8 +194,7 @@ def set_property_values_per_element_result(
     """Diagnostic 2D bulk write returning a BatchResult of Archicad execution results."""
     payload = create_element_property_values(elements, properties, values_matrix)
     raw_res = api.tapir.property.set_property_values_of_elements(payload)
-    results = getattr(raw_res, "executionResults", raw_res)
-    return BatchResult.from_items(results, root_key="executionResults")
+    return BatchResult.from_items(raw_res, root_key="executionResults")
 
 
 def set_property_values_per_element(
@@ -243,11 +246,8 @@ def get_property_details_result(
     api: UnifiedApi, properties: Sequence[PropertyIdLike]
 ) -> BatchResult[official.PropertyDefinition]:
     """Diagnostic metadata lookup returning a BatchResult container."""
-    raw = api.official.property.get_details_of_properties([to_official_property_id(p) for p in properties])
-    items = getattr(raw, "propertyDefinitions", raw)
-    return BatchResult.from_items(
-        items, accessor=lambda it: getattr(it, "propertyDefinition", it), root_key="propertyDefinitions"
-    )
+    property_definition = api.official.property.get_details_of_properties([to_official_property_id(p) for p in properties])
+    return BatchResult.from_items(property_definition,  root_key="propertyDefinitions")
 
 
 def get_property_details(
@@ -263,9 +263,10 @@ def get_property_types_result(
     api: UnifiedApi, properties: Sequence[PropertyIdLike]
 ) -> BatchResult[str]:
     """Diagnostic data type names lookup returning a BatchResult container."""
-    raw = api.official.property.get_details_of_properties([to_official_property_id(p) for p in properties])
-    items = getattr(raw, "propertyDefinitions", raw)
-    return BatchResult.from_items(items, accessor=_extract_type_name, root_key="propertyDefinitions")
+    property_definition = api.official.property.get_details_of_properties([to_official_property_id(p) for p in properties])
+    return BatchResult.from_items(
+        property_definition, accessor=lambda it: it.type, root_key="propertyDefinitions"
+    )
 
 
 def get_property_types(
