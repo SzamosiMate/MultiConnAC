@@ -9,11 +9,10 @@ from multiconn_archicad.models.tapir import types as tapir
 from multiconn_archicad.utilities.identifiers import (
     ElementIdLike,
     PropertyIdLike,
-    PropertyUserIdLike,
+    PropertyUserId,
     normalize_element_ids,
     normalize_property_id,
     normalize_property_ids,
-    normalize_property_user_id,
     to_official_property_id,
 )
 from multiconn_archicad.utilities.results import BatchResult
@@ -49,15 +48,15 @@ def _to_prop_value(val: Any) -> tapir.PropertyValue:
 
 
 def resolve_property_ids_result(
-    api: UnifiedApi, property_user_ids: Sequence[PropertyUserIdLike]
+    api: UnifiedApi, property_user_ids: Sequence[PropertyUserId]
 ) -> BatchResult[tapir.PropertyIdArrayItem]:
     """Diagnostic batch lookup returning a BatchResult container."""
-    raw = api.official.property.get_property_ids([normalize_property_user_id(uid) for uid in property_user_ids])
+    raw = api.official.property.get_property_ids(property_user_ids)
     return BatchResult.from_items(raw, accessor=normalize_property_id, root_key="propertyIds")
 
 
 def resolve_property_ids(
-    api: UnifiedApi, property_user_ids: Sequence[PropertyUserIdLike]
+    api: UnifiedApi, property_user_ids: Sequence[PropertyUserId]
 ) -> list[tapir.PropertyIdArrayItem]:
     """Fail-fast batch lookup returning a clean list of Tapir PropertyId models."""
     res = resolve_property_ids_result(api, property_user_ids)
@@ -66,7 +65,7 @@ def resolve_property_ids(
 
 
 def resolve_property_id(
-    api: UnifiedApi, property_user_id: PropertyUserIdLike
+    api: UnifiedApi, property_user_id: PropertyUserId
 ) -> tapir.PropertyIdArrayItem:
     """Scalar convenience: resolves a single property identifier or raises."""
     return resolve_property_ids(api, [property_user_id])[0]

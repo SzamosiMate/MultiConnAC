@@ -30,10 +30,9 @@ PropertyIdLike = Union[
     UUID,
 ]
 
-PropertyUserIdLike = Union[
+PropertyUserId = Union[
     official.UserDefinedPropertyUserId,
     official.BuiltInPropertyUserId,
-    tuple[str, str],
 ]
 
 
@@ -86,17 +85,6 @@ def to_official_property_id(property_id: PropertyIdLike) -> official.PropertyIdA
         return property_id
     guid = normalize_property_id(property_id).propertyId.guid
     return official.PropertyIdArrayItem(propertyId=official.PropertyId(guid=guid))
-
-
-def normalize_property_user_id(user_id: PropertyUserIdLike) -> official.UserDefinedPropertyUserId | official.BuiltInPropertyUserId:
-    """Coerces a (group, name) tuple or typed user ID to an Official PropertyUserId."""
-    if isinstance(user_id, (official.UserDefinedPropertyUserId, official.BuiltInPropertyUserId)):
-        return user_id
-    if isinstance(user_id, (tuple, list)):
-        if len(user_id) != 2:
-            raise ValueError(f"Property user ID tuple must contain exactly (group, name), got {user_id!r}")
-        return official.UserDefinedPropertyUserId(type="UserDefined", localizedName=[str(user_id[0]), str(user_id[1])])
-    raise TypeError(f"Unsupported property user ID type: {type(user_id)!r}")
 
 
 def split_builtin_name(non_localized_name: str) -> tuple[str, str]:

@@ -7,8 +7,6 @@ from multiconn_archicad.utilities.identifiers import (
     normalize_element_id,
     normalize_element_ids,
     normalize_property_id,
-    normalize_property_ids,
-    normalize_property_user_id,
     split_builtin_name,
     to_official_property_id,
 )
@@ -105,30 +103,8 @@ def test_to_official_property_id():
 
 
 # ==============================================================================
-# Property User ID & Name Splitting Tests
+# Built-In Name Splitting Tests
 # ==============================================================================
-
-
-def test_normalize_property_user_id():
-    # From tuple
-    uid_tuple = ("Dimensions", "Height")
-    res_tuple = normalize_property_user_id(uid_tuple)
-    assert isinstance(res_tuple, official.UserDefinedPropertyUserId)
-    assert res_tuple.localizedName == ["Dimensions", "Height"]
-
-    # From Official models (idempotent)
-    ud = official.UserDefinedPropertyUserId(type="UserDefined", localizedName=["Custom", "Prop"])
-    bi = official.BuiltInPropertyUserId(type="BuiltIn", nonLocalizedName="General_ID")
-    assert normalize_property_user_id(ud) is ud
-    assert normalize_property_user_id(bi) is bi
-
-
-def test_normalize_property_user_id_invalid():
-    with pytest.raises(ValueError, match="must contain exactly"):
-        normalize_property_user_id(("SingleElement",))  # type: ignore
-
-    with pytest.raises(TypeError, match="Unsupported property user ID type"):
-        normalize_property_user_id(123)  # type: ignore
 
 
 def test_split_builtin_name():
