@@ -38,6 +38,8 @@ def _as_error_container(item: Any) -> ErrorContainers:
     if isinstance(item, ERROR_CONTAINER_MODELS):
         return item
     err = extract_error(item) or item
+    if isinstance(err, official.Error):
+        return official.ErrorItem(error=err)
     return tapir.ErrorItem(error=err)
 
 
@@ -262,115 +264,84 @@ class BatchResult(Generic[T]):
         return cls(items=items, errors=frozen_errors)
 
     def map(self, fn: Callable[[T], U], *, root_key: str = "map", catch_calc_errors: bool = True) -> BatchResult[U]:
-        """Apply a transformation while isolating errors and preserving 1:1 index alignment.
+        """Transform each item, preserving batch positions and direct API errors.
 
-        Bypasses root error containers, promotes sub-branch errors if touched by `fn`,
-        clears unselected zombie errors on clean returns, and absorbs runtime exceptions
-        into BatchError instances when enabled.
+        Composite items are passed to ``fn`` even when they contain errors. A clean
+        return clears unselected errors; errors in the return value are rescanned.
+        Failed attribute access on a known nested API error returns its original
+        container and BatchError, including its original coordinates. Other
+        callback exceptions become calculation errors, or propagate when
+        ``catch_calc_errors=False``. Key/index/type errors cannot reliably identify
+        a failed branch, so they follow the calculation-error policy.
+
+        Return values must be supported by ``find_errors``; unsupported types raise
+        ``UnsupportedResultNode`` regardless of ``catch_calc_errors``.
         """
         new_items: list[U | ErrorContainers] = []
         new_errors: dict[int, tuple[BatchError, ...]] = {}
 
-        for idx, item in enumerate(self.items):
-            mapped_item, slot_errors = self._map_slot(idx, item, fn, root_key, catch_calc_errors)
+        for batch_index, input_item in enumerate(self.items):
+            mapped_item_path = f"{root_key}[{batch_index}]"
+            if extract_error(input_item) is not None:
+                mapped_item = input_item
+                mapped_item_errors = self.errors.get(batch_index) or tuple(
+                    find_errors(input_item, mapped_item_path, (batch_index,))
+                )
+            else:
+                try:
+                    mapped_item = fn(input_item)
+                except Exception as callback_exception:
+                    original_api_failure = self._find_original_api_failure(batch_index, callback_exception)
+                    if original_api_failure is not None:
+                        # Keep the original API failure, not the Python AttributeError.
+                        mapped_item, original_batch_error = original_api_failure
+                        mapped_item_errors = (original_batch_error,)
+                    elif catch_calc_errors:
+                        mapped_item, mapped_item_errors = self._create_calc_error(
+                            batch_index, root_key, callback_exception
+                        )
+                    else:
+                        raise
+                else:
+                    mapped_item_errors = tuple(find_errors(mapped_item, mapped_item_path, (batch_index,)))
+
             new_items.append(mapped_item)
-            if slot_errors:
-                new_errors[idx] = slot_errors
+            if mapped_item_errors:
+                new_errors[batch_index] = mapped_item_errors
 
         return BatchResult(items=new_items, errors=new_errors)
 
-    def _map_slot(
-        self, idx: int, item: Any, fn: Callable[[T], U], root_key: str, catch_calc_errors: bool
-    ) -> tuple[U | ErrorContainers, tuple[BatchError, ...]]:
-        if extract_error(item) is not None:
-            return item, self._passthrough_slot_errors(idx, item, root_key)
-        return self._transform_slot(idx, item, fn, root_key, catch_calc_errors)
-
-    def _passthrough_slot_errors(self, idx: int, item: Any, root_key: str) -> tuple[BatchError, ...]:
-        if idx in self.errors:
-            return self.errors[idx]
-        err = extract_error(item)
-        return (BatchError(path=f"{root_key}[{idx}]", indices=(idx,), error=err),)
-
-    def _transform_slot(
-        self, idx: int, item: Any, fn: Callable[[T], U], root_key: str, catch_calc_errors: bool
-    ) -> tuple[U | ErrorContainers, tuple[BatchError, ...]]:
-        try:
-            val = fn(item)
-        except (AttributeError, KeyError, IndexError, TypeError) as exc:
-            promoted = self._resolve_promoted_error(idx, exc)
-            if promoted is not None:
-                promoted_item, matched_err = promoted
-                return promoted_item, (matched_err,)
-            if not catch_calc_errors:
-                raise
-            return self._create_calc_error(idx, root_key, exc)
-        except Exception as exc:
-            if not catch_calc_errors:
-                raise
-            return self._create_calc_error(idx, root_key, exc)
-
-        val_errors = tuple(find_errors(val, path=f"{root_key}[{idx}]", indices=(idx,)))
-        return val, val_errors
-
-    def _resolve_promoted_error(self, idx: int, exc: Exception) -> Optional[tuple[ErrorContainers, BatchError]]:
-        err_list = self.errors.get(idx)
-        if not err_list:
+    def _find_original_api_failure(
+        self, batch_index: int, callback_exception: Exception
+    ) -> Optional[tuple[ErrorContainers, BatchError]]:
+        """Find the original API failure behind a callback's AttributeError.
+        Return None when the exception cannot be linked to a recorded API error.
+        This ensures: the branch's original error is preserved, and error are not duplicated.
+        """
+        if not isinstance(callback_exception, AttributeError):
+            return None
+        attribute_access_target = callback_exception.obj
+        original_api_error = extract_error(attribute_access_target)
+        if original_api_error is None:
             return None
 
-        return (
-            self._match_error_by_object(exc, err_list)
-            or self._match_error_by_name(exc, err_list)
-            or self._match_single_error_by_type(exc, err_list)
+        for recorded_batch_error in self.errors.get(batch_index, ()):
+            if recorded_batch_error.error is original_api_error:
+                return _as_error_container(attribute_access_target), recorded_batch_error
+        return None
+
+    @staticmethod
+    def _create_calc_error(
+        batch_index: int, root_key: str, callback_exception: Exception
+    ) -> tuple[tapir.ErrorItem, tuple[BatchError, ...]]:
+        calculation_error = tapir.Error(code=500, message=f"{type(callback_exception).__name__}: {callback_exception}")
+        calculation_batch_error = BatchError(
+            path=f"{root_key}[{batch_index}]", indices=(batch_index,), error=calculation_error
         )
+        return tapir.ErrorItem(error=calculation_error), (calculation_batch_error,)
 
-    @staticmethod
-    def _match_error_by_object(
-        exc: Exception, err_list: tuple[BatchError, ...]
-    ) -> Optional[tuple[ErrorContainers, BatchError]]:
-        exc_obj = getattr(exc, "obj", None)
-        if exc_obj is None:
-            return None
-
-        target_err = extract_error(exc_obj)
-        if target_err is None:
-            return None
-
-        for b_err in err_list:
-            if b_err.error == target_err:
-                return _as_error_container(exc_obj), b_err
-        return _as_error_container(exc_obj), err_list[0]
-
-    @staticmethod
-    def _match_error_by_name(
-        exc: Exception, err_list: tuple[BatchError, ...]
-    ) -> Optional[tuple[ErrorContainers, BatchError]]:
-        name = getattr(exc, "name", None) or (exc.args[0] if isinstance(exc, KeyError) and exc.args else None)
-        if not name:
-            return None
-
-        name_str = str(name)
-        for b_err in err_list:
-            tokens = b_err.path.replace("[", ".").replace("]", "").split(".")
-            if name_str in tokens:
-                return _as_error_container(b_err.error), b_err
-        return None
-
-    @staticmethod
-    def _match_single_error_by_type(
-        exc: Exception, err_list: tuple[BatchError, ...]
-    ) -> Optional[tuple[ErrorContainers, BatchError]]:
-        if len(err_list) == 1 and isinstance(exc, (IndexError, TypeError)):
-            return _as_error_container(err_list[0].error), err_list[0]
-        return None
-
-    @staticmethod
-    def _create_calc_error(idx: int, root_key: str, exc: Exception) -> tuple[tapir.ErrorItem, tuple[BatchError, ...]]:
-        err_model = tapir.Error(code=500, message=f"{type(exc).__name__}: {exc}")
-        batch_err = BatchError(path=f"{root_key}[{idx}]", indices=(idx,), error=err_model)
-        return tapir.ErrorItem(error=err_model), (batch_err,)
-
-    def realign(self, sub_result: BatchResult[U], indices: Optional[Sequence[int]] = None, *, step_name: str = "step"
+    def realign(
+        self, sub_result: BatchResult[U], indices: Optional[Sequence[int]] = None, *, step_name: str = "step"
     ) -> BatchResult[T | U]:
         """Scatter sub-batch items and errors back into master coordinate space.
 
