@@ -33,6 +33,23 @@ class TestExtractError:
 
 
 class TestBatchResultFromItems:
+    def test_dictionary_errors_preserve_keys_and_sequence_coordinates(self):
+        error = tapir.ErrorItem(error=tapir.Error(code=42, message="Unavailable"))
+        raw = [{"Properties": [{"FireRating": error}], "ID": "Door-01"}]
+
+        result = BatchResult.from_items(raw, root_key="elements")
+
+        assert result.items == raw
+        assert result.errors[0][0].path == "elements[0]['Properties'][0]['FireRating']"
+        assert result.errors[0][0].indices == (0, 0)
+        assert result.errors[0][0].error is error.error
+
+    def test_plain_error_shaped_dictionary_is_data(self):
+        result = BatchResult.from_items([{"code": 500, "message": "Report text"}, {}])
+
+        assert result.is_all_success
+        assert len(result.successes) == 2
+
     def test_all_successful_flat(self):
         raw = ["elem_1", "elem_2"]
         result = BatchResult.from_items(raw)

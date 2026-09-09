@@ -79,6 +79,12 @@ _LEAF_TYPES = (str, int, float, bool, bytes, UUID, Enum)
 
 
 def find_errors(node: Any, path: str = "root", indices: tuple[int, ...] = ()) -> list[BatchError]:
+    """Find typed API errors in models, lists/tuples, and dictionary values.
+
+    Dictionary keys appear in paths using repr (e.g. root[0]['Rating']).
+    Only list/tuple positions contribute to indices; keys are not indices.
+    Plain dictionaries with code/message fields remain ordinary data.
+    """
     err = extract_error(node)
     if err is not None:
         return [BatchError(path=path, indices=indices, error=err)]
@@ -90,6 +96,9 @@ def find_errors(node: Any, path: str = "root", indices: tuple[int, ...] = ()) ->
     if isinstance(node, (list, tuple)):
         for i, child in enumerate(node):
             errors.extend(find_errors(child, f"{path}[{i}]", indices + (i,)))
+    elif isinstance(node, Mapping):
+        for key, child in node.items():
+            errors.extend(find_errors(child, f"{path}[{key!r}]", indices))
     elif isinstance(node, BaseModel):
         for field_name, val in node:
             if val is not None:
@@ -97,18 +106,22 @@ def find_errors(node: Any, path: str = "root", indices: tuple[int, ...] = ()) ->
     else:
         raise UnsupportedResultNode(
             f"find_errors hit unsupported type {type(node).__name__!r} at path '{path}'; "
-            "expected a Pydantic model, list/tuple or a leaf primitive."
+            "expected a Pydantic model, dict, list/tuple or a leaf primitive."
         )
     return errors
 
 
 @dataclass(frozen=True, slots=True, repr=False)
 class BatchResult(Generic[T]):
-    """Immutable batch execution container preserving 1:1 index alignment.
+    """Batch execution container preserving 1:1 index alignment.
+
+    Frozen fields prevent reassignment, not mutation of contained collections or
+    models. Transformations create new containers but may share nested objects.
+    Callers and callbacks must avoid mutating shared data when branching.
 
     Guarantees:
     - len(items) == len(input_items)
-    - Failed indices contain their raw Error model in `items` and are mapped in `errors[batch_idx]`.
+    - Errors may be direct items or nested in composite items; recorded errors are in `errors[batch_idx]`.
     - Multiple errors occurring on the same batch index are preserved in `errors[batch_idx]`.
     - Truthiness evaluates to True only when all operations succeeded (is_all_success).
     """

@@ -281,3 +281,26 @@ class TestBatchResultMap:
 
         with pytest.raises(KeyboardInterrupt):
             BatchResult.from_items([1]).map(interrupt)
+
+    def test_dictionary_projection_can_keep_or_drop_nested_errors(self):
+        error = tapir.ErrorItem(error=tapir.Error(code=42, message="Unavailable"))
+        source = BatchResult.from_items([{"ID": "Door-01", "Rating": error}])
+
+        retained = source.map(lambda row: {"FireRating": row["Rating"]})
+        clean = source.map(lambda row: {"ID": row["ID"]})
+
+        assert retained.errors[0][0].path == "map[0]['FireRating']"
+        assert retained.errors[0][0].indices == (0,)
+        assert retained.errors[0][0].error is error.error
+        assert clean.items == [{"ID": "Door-01"}]
+        assert clean.is_all_success
+        assert source.errors[0][0].path == "root[0]['Rating']"
+
+    def test_failed_attribute_access_in_dictionary_preserves_original_error(self):
+        error = official.ErrorItem(error=official.Error(code=42, message="Unavailable"))
+        source = BatchResult.from_items([{"Rating": error}])
+
+        result = source.map(lambda row: row["Rating"].value, catch_calc_errors=False)
+
+        assert result.items[0] is error
+        assert result.errors[0][0] is source.errors[0][0]
