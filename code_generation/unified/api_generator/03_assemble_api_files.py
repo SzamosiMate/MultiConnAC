@@ -151,6 +151,7 @@ class FileAssembler:
             "",
             "from __future__ import annotations",
             "from typing import TYPE_CHECKING",
+            "from multiconn_archicad.utilities.api import Utilities",
             "",
             "\n".join(unique_imports),
             "",
@@ -173,6 +174,7 @@ class FileAssembler:
             "    def __init__(self, core: CoreCommands):",
             "        self.tapir = TapirApi(core)",
             "        self.official = OfficialApi(core)",
+            "        self.utilities = Utilities(self)",
         ]
 
         output_path = self._output_dir / "api.py"

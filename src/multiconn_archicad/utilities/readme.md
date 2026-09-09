@@ -28,15 +28,15 @@ The `utilities` subpackage provides **Level 3 Ergonomic Sugar** on top of `Unifi
 
 ## 2. Core API Design Principles
 
-### A. Pure Functions First (Strict Statelessness)
-* Utilities are stateless standalone functions; payload builders and transformations are pure, while API operations perform I/O.
-* **Classes:** Result value containers (`BatchResult`, `BatchError`) and resource lifecycle context managers (e.g., planned `TeamworkReserve`) are permitted.
+### A. Bound Operations and Pure Helpers
+* API-dependent operations are methods on domain groups such as `PropertyUtilities`, bound to one `UnifiedApi`. They store only the API reference and do not cache BIM data. Payload builders, identifier normalizers, and extractors remain standalone pure functions.
+* **Classes:** API-bound utility groups, result containers (`BatchResult`, `BatchError`), and resource lifecycle context managers (e.g., planned `TeamworkReserve`) are permitted.
 * **No "Active Record" Objects:** Never wrap an Archicad element in a stateful class with instance methods (e.g., `element.get_property()`). This encourages iterative $N+1$ socket calls, severely degrading CAD performance.
 
 ### B. The Dedicated Dual-Method Convention
-To serve both fast-prototyping scripts and large-scale, eager batch pipelines (e.g., 100k+ elements), bulk operations provide two companion functions:
+To serve both fast-prototyping scripts and large-scale, eager batch pipelines (e.g., 100k+ elements), bulk operations provide two companion methods:
 
-1. **Standard Function (`<name>`):**
+1. **Standard Method (`<name>`):**
    * **Target:** Simple scripts and rapid prototypes that require a clean result or an exception.
    * **Behavior:** **Raises on reported failure.** After the batch response arrives, any element or inner property failure raises a descriptive `BatchOperationError`. Writes may already have partially succeeded; these helpers provide no rollback or atomicity.
    * **Return Types:** Plain Python types (`list[T]`, scalar primitives) for queries, and **`int` (count of written property values for property setters)** for writes.
@@ -46,7 +46,7 @@ To serve both fast-prototyping scripts and large-scale, eager batch pipelines (e
    * **Behavior:** **Retains reported partial failures.** Preserves 1:1 index alignment and stores structured `BatchError` entries. Invalid inputs, transport failures, and whole-command errors can still raise.
    * **Return Types:** Always returns `BatchResult[T]`.
 3. **Scalar Convenience (`<name>` singular):**
-   * Provided where intuitive (e.g., `resolve_property_id`), simply delegating to the batch form: `resolve_property_ids(api, [uid])[0]`.
+   * Provided where intuitive (e.g., `resolve_property_id`), simply delegating to the batch form: `self.resolve_property_ids([uid])[0]`.
 
 ### C. Batch-First by Default
 Archicad JSON API is optimized for bulk operations.
@@ -66,12 +66,37 @@ Archicad JSON API is optimized for bulk operations.
    * Diagnostic variants return `BatchResult[T]`.
    * Default to standard Python primitives (`str`, `float`, `int`, `bool`, `None`) or standard typed models.
 
-### E. Consistent Signatures
-Every utility interacting with Archicad **must take `api: UnifiedApi` as its first parameter**:
+### E. Public Access and Consistent Signatures
+
+Use `header.unified.utilities.property` (or `api.utilities.property` for a standalone
+`UnifiedApi`). API operations are implemented directly as methods, with no duplicate
+standalone forwarding functions. The former `operation(api, ...)` calling style is
+replaced by `api.utilities.property.operation(...)`.
+
 ```python
-def get_property_values_per_element(api: UnifiedApi, elements: Sequence[ElementIdLike], properties: Sequence[PropertyIdLike]) -> list[list[Any]]:
-    ...
+from multiconn_archicad.utilities import Utilities, BatchResult
+from multiconn_archicad.utilities.properties import create_element_property_values_flat
+
+utils = api.utilities
+values = utils.property.get_flat_property_values(elements, property_id)
+result = utils.property.set_flat_property_values_result(elements, property_id, values)
+
+# Explicit binding is also available, including for tests:
+utils = Utilities(api)
+
+# Pure builders do not need a connection:
+payload = create_element_property_values_flat(elements, property_id, values)
 ```
+
+The package explicitly exports `Utilities`, `BatchResult`, `BatchError`, and
+`BatchOperationError`. Import pure helpers directly from their defining modules.
+`PropertyUtilities` can be imported from the `properties` module for direct
+construction in tests.
+
+Each `UnifiedApi` owns its utilities. Changing a header's port replaces its API and
+associated utilities; previously saved API or utilities references still refer to
+the old instance. `UnifiedApi` is generated, so its utilities attachment is also
+maintained in the API generator.
 
 ---
 
@@ -92,7 +117,8 @@ def get_property_values_per_element(api: UnifiedApi, elements: Sequence[ElementI
 
 ```text
 src/multiconn_archicad/utilities/
-├── __init__.py           # Currently empty; public re-exports are not yet defined
+├── __init__.py           # Small public export surface
+├── api.py                # Utilities domain-group container
 ├── readme.md             # This document
 ├── results.py            # BatchResult, BatchError, find_errors, BatchOperationError
 ├── identifiers.py        # Liberal type aliases & universal ID normalizers
@@ -111,7 +137,7 @@ Centralizes type coercion across all utilities.
 * **Input aliases:** `ElementIdLike` and `PropertyIdLike` accept models, UUIDs, and GUID strings. `PropertyUserId` accepts Official `BuiltInPropertyUserId` / `UserDefinedPropertyUserId` models; name tuples are not supported.
 * **Coercion Functions:** `normalize_element_id()`, `normalize_element_ids()`, `normalize_property_id()`, `normalize_property_ids()`, `to_official_property_id()`, `split_builtin_name()`.
 
-### `properties.py` (Batch Operations)
+### `properties.py` (`PropertyUtilities` and Pure Helpers)
 
 #### Value representation and result shape
 
@@ -133,6 +159,10 @@ property. For two elements and three properties, the diagnostic write returns tw
 rows of three execution results, while the raising setter returns `6` if all
 writes succeed. Flat operations use one result slot per element. Utilities trust
 the client/API response ordering and shape rather than revalidating every response.
+
+The following resolution, read, write, and metadata operations are methods on
+`api.utilities.property`. Payload builders and `get_possible_enum_values` remain
+module-level functions.
 
 * **Resolution:**
   * `resolve_property_ids(...) -> list[PropertyIdArrayItem]` / `resolve_property_ids_result(...) -> BatchResult`
@@ -218,7 +248,7 @@ When writing to Archicad, you must not send failed elements over the socket. You
 ```python
 # Sub-batch write (only sends the 9,800 healthy items)
 valid_elements = step2.filter_successful(elements)
-sub_res = set_flat_property_values_result(api, valid_elements, prop_area, step2.successes)
+sub_res = api.utilities.property.set_flat_property_values_result(valid_elements, prop_area, step2.successes)
 
 # Realign scatters the 9,800 results back into the 10,000-element master track.
 # By default, indices=step2.success_indices automatically!
@@ -246,7 +276,7 @@ step3_joined = step3_a.zip(step3_b)
 To correlate external data sequences with batch results without altering container shapes:
 
 ```python
-res = set_property_values_per_element_result(api, panels, properties, matrix)
+res = api.utilities.property.set_property_values_per_element_result(panels, properties, matrix)
 
 # Padded masks (preserves original input length, replaces failures/successes with fallback):
 res.success_mask(panels)              # ["Wall_A", None, "Wall_C"]
@@ -267,6 +297,7 @@ We maintain a strict **2-Tier Testing Strategy**:
 tests/utilities/
 ├── unit/                       # Tier 1: 100% Offline, runs on CI (<1s)
 │   ├── test_identifiers.py     # Pure conversions, UUID parsing, type unions
+│   ├── test_utilities_api.py   # Namespace and independent API bindings
 │   ├── test_results.py         # BatchResult contracts, tree errors, masking
 │   ├── test_results_map.py     # Projection and calculation errors
 │   ├── test_results_realign.py # Sub-batch alignment and history
@@ -290,7 +321,7 @@ tests/utilities/
 
 * **Retry support:** Define how a successful explicit retry clears an active failure while retaining useful history. This is lower priority: many Archicad failures need human intervention before retrying. No automatic retry loop is currently provided.
 
-* **`get_available_property_ids_of_elements(api, elements)`**: Query Archicad's `GetAllPropertyNamesOfElements` to check property availability by Classification before executing writes.
+* **`utils.property.get_available_property_ids_of_elements(elements)`**: Query Archicad's `GetAllPropertyNamesOfElements` to check property availability by Classification before executing writes.
 * **`elements.py`**: Batch selection getter/setter, element type filtering (e.g., 3D element queries).
 * **`attributes.py`**: Layer combinations and visible layer extractors.
 * **`teamwork.py`**: Context manager for safe element reservation and automatic sending.

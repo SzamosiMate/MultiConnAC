@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Optional, TypeVar
 from uuid import UUID
 
-from multiconn_archicad import BatchOperationError, UnsupportedResultNode
+from multiconn_archicad.errors import BatchOperationError, UnsupportedResultNode
 from multiconn_archicad.models.official import types as official
 from multiconn_archicad.models.tapir import types as tapir
 

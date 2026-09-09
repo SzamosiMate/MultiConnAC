@@ -4,6 +4,8 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
+from multiconn_archicad.utilities.api import Utilities
+
 from .official.addon import AddonCommands as OfficialAddonCommands
 from .official.attribute import AttributeCommands as OfficialAttributeCommands
 from .official.basic import BasicCommands as OfficialBasicCommands
@@ -96,3 +98,4 @@ class UnifiedApi:
     def __init__(self, core: CoreCommands):
         self.tapir = TapirApi(core)
         self.official = OfficialApi(core)
+        self.utilities = Utilities(self)
