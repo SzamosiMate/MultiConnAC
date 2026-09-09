@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import uuid
+
+from multiconn_archicad.errors import UnsupportedResultNode
 from multiconn_archicad.utilities.results import BatchError, BatchOperationError, BatchResult, extract_error
 from multiconn_archicad.models.official import types as official_types
 from multiconn_archicad.models.tapir import types as tapir_types
@@ -196,7 +199,82 @@ class TestRaiseForErrors:
             result.raise_for_errors("Element query")
 
         exc = exc_info.value
-        assert isinstance(exc, RuntimeError)
         assert exc.result is result
         assert "Element query failed with 1 error(s) across 1 item(s):" in str(exc)
         assert "- elements[1]: [404] Element deleted" in str(exc)
+
+class TestBatchResultMap:
+    def test_map_all_success(self):
+        result = BatchResult.from_items(["apple", "banana"])
+        mapped = result.map(lambda s: s.upper())
+
+        assert mapped.is_all_success is True
+        assert mapped.items == ["APPLE", "BANANA"]
+        assert mapped.successes == ["APPLE", "BANANA"]
+        assert mapped.errors == {}
+
+    def test_map_preserves_errors_and_skips_fn_on_failed_indices(self):
+        err = tapir_types.ErrorItem(error=tapir_types.Error(code=404, message="Not found"))
+        result = BatchResult.from_items(["apple", err, "cherry"])
+
+        # fn raises if called on an ErrorItem or non-string
+        mapped = result.map(lambda s: s.upper())
+
+        assert mapped.is_all_success is False
+        assert mapped.items == ["APPLE", err, "CHERRY"]
+        assert mapped.successes == ["APPLE", "CHERRY"]
+        # Error mapping, coordinates, and counts must be preserved exactly
+        assert mapped.errors == result.errors
+        assert mapped.total_errors == 1
+        assert mapped.errors[1][0].code == 404
+
+class TestFindErrors:
+    def test_raises_unsupported_result_node_for_invalid_types(self):
+        with pytest.raises(UnsupportedResultNode, match="hit unsupported type 'set'"):
+            BatchResult.from_items([{"not", "supported"}])
+
+    @pytest.mark.parametrize("leaf", ["str", 42, 3.14, True, b"bytes", uuid.uuid4()])
+    def test_primitives_produce_no_errors(self, leaf):
+        result = BatchResult.from_items([leaf])
+        assert result.is_all_success is True
+        assert result.total_errors == 0
+
+
+class TestBatchResultTruthinessAndEmpty:
+    def test_truthiness_evaluates_on_success_status(self):
+        success_result = BatchResult.from_items(["item1", "item2"])
+        assert bool(success_result) is True
+
+        err = tapir_types.ErrorItem(error=tapir_types.Error(code=1, message="fail"))
+        failure_result = BatchResult.from_items(["item1", err])
+        assert bool(failure_result) is False
+
+    def test_empty_batch_result(self):
+        result = BatchResult.from_items([])
+        assert result.is_all_success is True
+        assert result.items == []
+        assert result.successes == []
+        assert str(result) == "BatchResult[empty]: empty"
+        assert repr(result) == "BatchResult[empty](total=0, successes=0, errors=0)"
+
+
+class TestBatchErrorDetails:
+    def test_all_errors_property(self):
+        err1 = tapir_types.ErrorItem(error=tapir_types.Error(code=1, message="E1"))
+        err2 = tapir_types.ErrorItem(error=tapir_types.Error(code=2, message="E2"))
+        result = BatchResult.from_items([err1, "ok", err2])
+
+        all_errs = result.all_errors
+        assert len(all_errs) == 2
+        assert [e.code for e in all_errs] == [1, 2]
+        assert str(all_errs[0]) == "root[0]: [1] E1"
+
+    def test_error_code_and_message_fallbacks(self):
+        class MinimalError:
+            def __str__(self):
+                return "bare error"
+
+        batch_err = BatchError(path="root[0]", indices=(0,), error=MinimalError())  # type: ignore
+        assert batch_err.code == "ERR"
+        assert batch_err.message == "bare error"
+        assert str(batch_err) == "root[0]: [ERR] bare error"

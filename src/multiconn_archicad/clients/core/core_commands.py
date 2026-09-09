@@ -20,7 +20,7 @@ from multiconn_archicad.orchestration.basic_types import Port
 from multiconn_archicad.orchestration.system.cli_parser import get_cli_args_once
 
 if TYPE_CHECKING:
-    from multiconn_archicad.core.literal_commands import AddonCommandType, TapirCommandType
+    from multiconn_archicad.clients.core.literal_commands import AddonCommandType, TapirCommandType
 
 
 log = logging.getLogger(__name__)

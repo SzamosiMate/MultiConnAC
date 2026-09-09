@@ -225,9 +225,9 @@ def test_set_property_values_per_element_result_and_masking(mock_api):
 
     assert res.is_all_success is False
     assert len(res.items) == 2
-    assert res.items[1] == err_exec
+    assert res.items[1] == [err_exec]  # grouped: one-property row, still holding the raw failure
     assert res.errors[1][0].code == 500
-    assert res.errors[1][0].path == "executionResults[1]"
+    assert res.errors[1][0].path == "elements[1][0]"
 
     # Test correlation to input parameters
     assert res.success_mask(elems) == [elem1, None]
@@ -277,15 +277,47 @@ def test_set_flat_property_values_fail_fast(mock_api):
     count = set_flat_property_values(mock_api, elems, prop, ["NewVal"])
     assert count == 1
 
+def test_set_flat_property_values_result(mock_api):
+    elem1, elem2 = uuid.uuid4(), uuid.uuid4()
+    prop = uuid.uuid4()
+    err_exec = tapir.FailedExecutionResult(success=False, error=tapir.Error(code=500, message="Locked"))
+
+    mock_api.tapir.property.set_property_values_of_elements.return_value = [
+        tapir.SuccessfulExecutionResult(success=True),
+        err_exec,
+    ]
+
+    res = set_flat_property_values_result(mock_api, [elem1, elem2], prop, ["Val1", "Val2"])
+
+    assert res.is_all_success is False
+    assert len(res.items) == 2
+    assert isinstance(res.items[0], tapir.SuccessfulExecutionResult)
+    assert res.items[1] == err_exec
+    assert res.errors[1][0].code == 500
+
 
 # ==============================================================================
 # Metadata & Inspection Tests
 # ==============================================================================
 
 
+def _make_property_definition(name: str, type_: str, description: str = "") -> official.PropertyDefinition:
+    return official.PropertyDefinition(
+        group=official.PropertyGroup(
+            propertyGroupId=official.PropertyGroupId(guid=uuid.uuid4()),
+            name="General",
+        ),
+        name=name,
+        description=description,
+        isEditable=True,
+        type=type_,
+        possibleEnumValues=None,
+    )
+
+
 def test_get_property_details_and_result(mock_api):
     prop = uuid.uuid4()
-    mock_prop_def = MagicMock(type="string", description="Test string")
+    mock_prop_def = _make_property_definition("ID", "string", description="Test string")
     # Mock returns unwrapped PropertyDefinition directly
     mock_api.official.property.get_details_of_properties.return_value = [
         mock_prop_def,
@@ -300,8 +332,8 @@ def test_get_property_details_and_result(mock_api):
 
 def test_get_property_types_and_result(mock_api):
     prop1, prop2 = uuid.uuid4(), uuid.uuid4()
-    mock_prop_def_1 = MagicMock(type="string")
-    mock_prop_def_2 = MagicMock(type="integer")
+    mock_prop_def_1 = _make_property_definition("ID", "string")
+    mock_prop_def_2 = _make_property_definition("Count", "integer")
 
     # Mock returns unwrapped PropertyDefinitions directly
     mock_api.official.property.get_details_of_properties.return_value = [

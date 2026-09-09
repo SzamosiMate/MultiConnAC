@@ -1,9 +1,8 @@
-# Base Exception
 from __future__ import annotations
+from typing import Any, TYPE_CHECKING
 
-from typing import Any
-
-from multiconn_archicad.utilities.results import BatchResult
+if TYPE_CHECKING:
+    from multiconn_archicad.utilities.results import BatchResult
 
 
 class MulticonnArchicadError(Exception):
@@ -127,3 +126,8 @@ class BatchOperationError(MulticonnArchicadError):
     def __init__(self, message: str, result: BatchResult[Any]):
         super().__init__(message)
         self.result = result
+
+class UnsupportedResultNode(MulticonnArchicadError, TypeError):
+    """Raised by find_errors when it hits a node type it wasn't built to traverse."""
+
+    pass

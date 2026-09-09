@@ -26,7 +26,7 @@ def _extract_property_values(element: tapir.PropertyValuesArrayItem) -> list[str
     """Extracts string property values, preserving inner ErrorItems on failure."""
     return [
         p.propertyValue.value if isinstance(p, tapir.PropertyValueArrayItem) else p
-        for p in getattr(element, "propertyValues", [])
+        for p in element.propertyValues
     ]
 
 
@@ -159,9 +159,13 @@ def create_element_property_values(
     """Builds an N x M list of ElementPropertyValue mutation models."""
     norm_elements = normalize_element_ids(elements)
     norm_props = normalize_property_ids(properties)
+    if len(norm_elements) != len(values_matrix):
+        raise ValueError(f"Expected {len(norm_elements)} rows in values_matrix, got {len(values_matrix)}.")
 
     payload: list[tapir.ElementPropertyValue] = []
     for elem, row in zip(norm_elements, values_matrix):
+        if len(norm_props) != len(row):
+            raise ValueError(f"Expected {len(norm_props)} values per row, got {len(row)}.")
         for prop, val in zip(norm_props, row):
             payload.append(
                 tapir.ElementPropertyValue(
@@ -178,6 +182,8 @@ def create_element_property_values_flat(
 ) -> list[tapir.ElementPropertyValue]:
     """Builds a 1D list of ElementPropertyValue models mapping elements and values to a single property."""
     pid = normalize_property_id(property_id).propertyId
+    if len(elements) != len(values):
+        raise ValueError(f"Expected {len(elements)} rows in values, got {len(values)}.")
     return [
         tapir.ElementPropertyValue(elementId=e.elementId, propertyId=pid, propertyValue=_to_prop_value(v))
         for e, v in zip(normalize_element_ids(elements), values)
@@ -191,9 +197,11 @@ def set_property_values_per_element_result(
     values_matrix: Sequence[Sequence[Any]],
 ) -> BatchResult[tapir.SuccessfulExecutionResult]:
     """Diagnostic 2D bulk write returning a BatchResult of Archicad execution results."""
+    n_props = len(properties)
     payload = create_element_property_values(elements, properties, values_matrix)
     raw_res = api.tapir.property.set_property_values_of_elements(payload)
-    return BatchResult.from_items(raw_res, root_key="executionResults")
+    grouped = [raw_res[i * n_props : (i + 1) * n_props] for i in range(len(elements))]
+    return BatchResult.from_items(grouped, root_key="elements")
 
 
 def set_property_values_per_element(
@@ -208,7 +216,7 @@ def set_property_values_per_element(
     """
     res = set_property_values_per_element_result(api, elements, properties, values_matrix)
     res.raise_for_errors("Batch property values write")
-    return len(res.successes)
+    return len(elements) * len(properties)
 
 
 def set_flat_property_values_result(
@@ -218,7 +226,9 @@ def set_flat_property_values_result(
     values: Sequence[Any],
 ) -> BatchResult[tapir.SuccessfulExecutionResult]:
     """Diagnostic 1D bulk write setting a single property across multiple elements."""
-    return set_property_values_per_element_result(api, elements, [property_id], [[v] for v in values])
+    payload = create_element_property_values_flat(elements, property_id, values)
+    raw_res = api.tapir.property.set_property_values_of_elements(payload)
+    return BatchResult.from_items(raw_res, root_key="executionResults")
 
 
 def set_flat_property_values(
@@ -262,10 +272,7 @@ def get_property_types_result(
     api: UnifiedApi, properties: Sequence[PropertyIdLike]
 ) -> BatchResult[str]:
     """Diagnostic data type names lookup returning a BatchResult container."""
-    property_definition = api.official.property.get_details_of_properties([to_official_property_id(p) for p in properties])
-    return BatchResult.from_items(
-        property_definition, accessor=lambda it: it.type, root_key="propertyDefinitions"
-    )
+    return get_property_details_result(api, properties).map(lambda d: d.type)
 
 
 def get_property_types(

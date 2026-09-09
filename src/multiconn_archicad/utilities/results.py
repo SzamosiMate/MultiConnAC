@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from enum import Enum
+from pydantic import BaseModel
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, Optional, TypeVar
+from uuid import UUID
 
+from multiconn_archicad import BatchOperationError, UnsupportedResultNode
 from multiconn_archicad.models.official import types as official
 from multiconn_archicad.models.tapir import types as tapir
 
@@ -17,7 +21,7 @@ ERROR_CONTAINER_MODELS = (
 T = TypeVar("T")
 U = TypeVar("U")
 ErrorType = tapir.Error | official.Error
-ErrorContainers = ERROR_CONTAINER_MODELS
+ErrorContainers = tapir.FailedExecutionResult | tapir.ErrorItem | official.FailedExecutionResult | official.ErrorItem
 
 def extract_error(item: Any) -> Optional[ErrorType]:
     """Extract an Archicad API Error instance from typed response items."""
@@ -48,29 +52,31 @@ class BatchError:
         return f"{self.path}: [{self.code}] {self.message}"
 
 
+_LEAF_TYPES = (str, int, float, bool, bytes, UUID, Enum)
+
+
 def find_errors(node: Any, path: str = "root", indices: tuple[int, ...] = ()) -> list[BatchError]:
-    """Recursively walks Pydantic models and sequences to extract all Archicad errors."""
     err = extract_error(node)
     if err is not None:
         return [BatchError(path=path, indices=indices, error=err)]
+
+    if node is None or isinstance(node, _LEAF_TYPES):
+        return []
 
     errors: list[BatchError] = []
     if isinstance(node, (list, tuple)):
         for i, child in enumerate(node):
             errors.extend(find_errors(child, f"{path}[{i}]", indices + (i,)))
-    elif hasattr(node, "__dict__"):
-        for field_name, val in node.__dict__.items():
-            if not field_name.startswith("_") and val is not None:
+    elif isinstance(node, BaseModel):
+        for field_name, val in node:
+            if val is not None:
                 errors.extend(find_errors(val, f"{path}.{field_name}", indices))
+    else:
+        raise UnsupportedResultNode(
+            f"find_errors hit unsupported type {type(node).__name__!r} at path '{path}'; "
+            "expected a Pydantic model, list/tuple or a leaf primitive."
+        )
     return errors
-
-
-class BatchOperationError(RuntimeError):
-    """Raised by fail-fast utility functions when one or more batch items fail."""
-
-    def __init__(self, message: str, result: BatchResult[Any]):
-        super().__init__(message)
-        self.result = result
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -111,6 +117,11 @@ class BatchResult(Generic[T]):
     def successes(self) -> list[T]:
         """Returns only the items that had zero errors anywhere in their evaluation."""
         return [item for idx, item in enumerate(self.items) if idx not in self.errors]
+
+    @property
+    def success_indices(self) -> tuple[int, ...]:
+        """Returns the tuple of indices that had zero errors."""
+        return tuple(idx for idx in range(len(self.items)) if idx not in self.errors)
 
     def _validate_alignment(self, parameters: Sequence[Any]) -> None:
         """Ensures the external parameter sequence aligns 1:1 with the result items."""
@@ -160,12 +171,6 @@ class BatchResult(Generic[T]):
         if not self.items:
             return "empty"
         sample = self.successes[0] if self.successes else None
-        if sample is None:
-            # Fall back to first non-error item in items
-            for idx, it in enumerate(self.items):
-                if idx not in self.errors:
-                    return type(it).__name__
-            return "Unknown"
         return type(sample).__name__
 
     def __repr__(self) -> str:
@@ -234,3 +239,171 @@ class BatchResult(Generic[T]):
 
         frozen_errors = {k: tuple(v) for k, v in error_map.items()}
         return cls(items=items, errors=frozen_errors)
+
+    def map(
+            self,
+            fn: Callable[[T], U],
+            *,
+            root_key: str = "map",
+            catch_calc_errors: bool = True,
+    ) -> BatchResult[U]:
+        """Transforms batch items with pipeline error awareness.
+
+        - If fn(item) raises AttributeError/KeyError/IndexError on a dirty item,
+          the underlying API error is promoted to that slot.
+        - If fn(item) succeeds, the new value is inspected: if clean, zombie errors
+          from unselected branches are cleared.
+        - If catch_calc_errors is True, computation errors (ZeroDivisionError, ValueError,
+          etc.) are captured into BatchError rather than crashing the batch.
+        """
+        new_items: list[U | ErrorContainers] = []
+        new_errors: dict[int, tuple[BatchError, ...]] = {}
+
+        for idx, item in enumerate(self.items):
+            # 1. If this slot is already a raw root-level error container, pass it through
+            if extract_error(item) is not None:
+                new_items.append(item)
+                if idx in self.errors:
+                    new_errors[idx] = self.errors[idx]
+                continue
+
+            # 2. Attempt the transformation
+            try:
+                val = fn(item)
+            except (AttributeError, KeyError, IndexError, TypeError) as exc:
+                # Did fn navigate into a known broken branch?
+                if idx in self.errors:
+                    # Match the error from the item's error list, or take the primary error
+                    promoted_err = self._resolve_promoted_error(idx, exc)
+                    new_items.append(promoted_err)
+                    new_errors[idx] = self.errors[idx]
+                    continue
+
+                # If idx was not known to be broken, it's a real coding bug in fn
+                if not catch_calc_errors:
+                    raise
+                val = self._create_calc_error(idx, root_key, exc, new_errors)
+                new_items.append(val)
+                continue
+            except Exception as exc:
+                # Catch computational errors (e.g. ZeroDivisionError, ValueError)
+                if not catch_calc_errors:
+                    raise
+                val = self._create_calc_error(idx, root_key, exc, new_errors)
+                new_items.append(val)
+                continue
+
+            # 3. fn succeeded: check if the returned value contains nested errors
+            val_errors = find_errors(val, path=f"{root_key}[{idx}]", indices=(idx,))
+            if val_errors:
+                new_errors[idx] = tuple(val_errors)
+
+            new_items.append(val)
+
+        return BatchResult(items=new_items, errors=new_errors)
+
+    def _resolve_promoted_error(self, idx: int, exc: Exception) -> ErrorContainers:
+        """Finds the most specific error model for the branch fn attempted to touch."""
+        err_list = self.errors[idx]
+        # If there's only one error on this item, promote it directly
+        target_error = err_list[0].error
+        if isinstance(target_error, (tapir.Error, official.Error)):
+            return tapir.ErrorItem(error=target_error)
+        return target_error
+
+    def _create_calc_error(
+            self, idx: int, root_key: str, exc: Exception, errors_dict: dict[int, tuple[BatchError, ...]]
+    ) -> tapir.ErrorItem:
+        """Packages an unhandled Python transformation exception into a standard BatchError."""
+        err_model = tapir.Error(code=500, message=f"{type(exc).__name__}: {exc}")
+        batch_err = BatchError(path=f"{root_key}[{idx}]", indices=(idx,), error=err_model)
+        errors_dict[idx] = (batch_err,)
+        return tapir.ErrorItem(error=err_model)
+
+    def realign(
+            self,
+            sub_result: BatchResult[U],
+            indices: Optional[Sequence[int]] = None,
+            *,
+            step_name: str = "step",
+    ) -> BatchResult[T | U]:
+        """Slices a sub-batch result back into the master coordinate space.
+
+        - Preserves previous errors and unselected items for skipped indices.
+        - Updates sub-batch errors to point to master coordinates.
+        - If `indices` is omitted, defaults to `self.success_indices`.
+        """
+        # 1. Determine and validate the index map
+        target_indices = tuple(indices) if indices is not None else self.success_indices
+
+        if len(target_indices) != len(sub_result.items):
+            raise ValueError(
+                f"Sub-batch length ({len(sub_result.items)}) does not match "
+                f"target indices length ({len(target_indices)})."
+            )
+
+        # 2. Clone master items and errors
+        new_items: list[T | U | ErrorContainers] = list(self.items)
+        new_errors: dict[int, list[BatchError]] = {k: list(v) for k, v in self.errors.items()}
+
+        # 3. Scatter items and re-index errors
+        for sub_idx, master_idx in enumerate(target_indices):
+            if master_idx < 0 or master_idx >= len(self.items):
+                raise IndexError(f"Master index {master_idx} is out of bounds for batch size {len(self.items)}.")
+
+            # Overwrite master item with sub-batch result
+            new_items[master_idx] = sub_result.items[sub_idx]
+
+            # If the sub-batch had errors on this item, re-index them to master space
+            if sub_idx in sub_result.errors:
+                for sub_err in sub_result.errors[sub_idx]:
+                    reindexed_err = BatchError(
+                        path=f"{step_name}[{master_idx}]",
+                        indices=(master_idx,) + sub_err.indices[1:],
+                        error=sub_err.error,
+                    )
+                    new_errors.setdefault(master_idx, []).append(reindexed_err)
+
+        frozen_errors = {k: tuple(v) for k, v in new_errors.items()}
+        return BatchResult(items=new_items, errors=frozen_errors)
+
+    def zip(self, other: BatchResult[U]) -> BatchResult[tuple[T | ErrorContainers, U | ErrorContainers]]:
+        """Joins two parallel branches of the same master batch.
+
+        - Pairs items into tuples: `(item_a, item_b)`.
+        - Unions errors from both branches, deduplicating shared ancestor errors.
+        - `success_indices` automatically becomes the intersection (items clean in both).
+        """
+        if len(self.items) != len(other.items):
+            raise ValueError(
+                f"Cannot zip BatchResult of length {len(self.items)} with length {len(other.items)}. "
+                "Both branches must be realigned to the same master size."
+            )
+
+        # 1. Pair items
+        zipped_items = list(zip(self.items, other.items))
+
+        # 2. Union and deduplicate errors across both branches
+        all_err_indices = set(self.errors.keys()) | set(other.errors.keys())
+        merged_errors: dict[int, list[BatchError]] = {}
+
+        for idx in all_err_indices:
+            errs_self = self.errors.get(idx, ())
+            errs_other = other.errors.get(idx, ())
+
+            # Deduplicate by error identity and path to prevent common
+            # parent errors from being duplicated
+            seen = set()
+            combined: list[BatchError] = []
+            for err in errs_self + errs_other:
+                key = (err.path, err.code, err.message)
+                if key not in seen:
+                    seen.add(key)
+                    combined.append(err)
+
+            merged_errors[idx] = combined
+
+        return BatchResult(
+            items=zipped_items,
+            errors={k: tuple(v) for k, v in merged_errors.items()}
+        )
