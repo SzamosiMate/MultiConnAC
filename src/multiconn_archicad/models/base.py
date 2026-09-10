@@ -6,6 +6,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "extra": "ignore",
     "populate_by_name": True,
     "serialize_by_alias": True,
+    "allow_inf_nan": False,
 }
 
 _merged_config = dict(_DEFAULT_CONFIG)
