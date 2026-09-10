@@ -2,6 +2,11 @@ import uuid
 from pydantic import BaseModel
 from enum import Enum
 from typing import Any
+import functools
+import sys
+import subprocess
+import os
+import pytest
 
 def normalize_for_comparison(value: Any) -> Any:
     """
@@ -28,3 +33,44 @@ def normalize_for_comparison(value: Any) -> Any:
         except ValueError:
             return value
     return value
+
+
+def run_in_process(fn):
+    """
+    Runs the decorated test function in a completely isolated Python subprocess.
+    Ensures sys.modules starts 100% clean with no pre-imported models or conftest leaks.
+    Inherits sys.path and environment so project imports work seamlessly on Windows.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        # Snippet to execute inside the subprocess:
+        # 1. Imports the test module
+        # 2. Resolves and calls the unwrapped test function
+        code = f"""
+import importlib
+
+mod = importlib.import_module({fn.__module__!r})
+test_fn = getattr(mod, {fn.__name__!r})
+while hasattr(test_fn, "__wrapped__"):
+    test_fn = getattr(test_fn, "__wrapped__")
+
+test_fn()
+"""
+        # Ensure project root is present in PYTHONPATH
+        env = os.environ.copy()
+        pythonpath = os.pathsep.join(sys.path)
+        env["PYTHONPATH"] = pythonpath
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        if result.returncode != 0:
+            # Print the child's stderr trace cleanly in pytest
+            error_output = result.stderr.strip() or result.stdout.strip()
+            pytest.fail(f"Subprocess test failed:\n{error_output}", pytrace=False)
+
+    return wrapper
