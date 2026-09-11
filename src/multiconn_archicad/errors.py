@@ -2,13 +2,11 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from multiconn_archicad.utilities.results import BatchResult
+    from multiconn_archicad.utilities.results import BatchResult, BatchResult2D
 
 
 class MulticonnArchicadError(Exception):
     """Base class for all custom exceptions in the multiconn_archicad package."""
-
-    pass
 
 
 # --- Errors that happen during communication with the API ---
@@ -79,6 +77,7 @@ class StandardAPIError(ArchicadAPIError):
 
 class StandardCommandUnavailable(StandardAPIError):
     """Raised when the ArchicadAPI receives an unknown command"""
+
     def __init__(self, message: str):
         super().__init__(message)
         self.code: int = 2002
@@ -87,6 +86,7 @@ class StandardCommandUnavailable(StandardAPIError):
 
 class AddOnCommandUnavailable(StandardAPIError):
     """Raised when the ArchicadAPI receives an unknown Add-on command"""
+
     def __init__(self, message: str):
         super().__init__(message)
         self.code: int = 4010
@@ -123,11 +123,6 @@ class NotFullyInitializedError(MulticonnArchicadError):
 class BatchOperationError(MulticonnArchicadError):
     """Raised by fail-fast utility functions when one or more batch items fail."""
 
-    def __init__(self, message: str, result: BatchResult[Any]):
+    def __init__(self, message: str, result: BatchResult[Any] | BatchResult2D[Any]):
         super().__init__(message)
         self.result = result
-
-class UnsupportedResultNode(MulticonnArchicadError, TypeError):
-    """Raised by find_errors when it hits a node type it wasn't built to traverse."""
-
-    pass

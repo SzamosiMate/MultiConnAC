@@ -14,15 +14,25 @@ from multiconn_archicad.utilities.identifiers import (
     normalize_property_ids,
     to_official_property_id,
 )
-from multiconn_archicad.utilities.results import BatchResult
+from multiconn_archicad.utilities.results import BatchResult, BatchResult2D, extract_error
 
 if TYPE_CHECKING:
     from multiconn_archicad.clients.unified_api.api import UnifiedApi
 
 
-def _extract_property_values(element: tapir.PropertyValuesArrayItem) -> list[str | tapir.ErrorItem]:
-    """Extracts string property values, preserving inner ErrorItems on failure."""
-    return [p.propertyValue.value if isinstance(p, tapir.PropertyValueArrayItem) else p for p in element.propertyValues]
+def _extract_property_value(item: tapir.PropertyValueArrayItem) -> str:
+    return item.propertyValue.value
+
+
+def _single_property_item(element: tapir.PropertyValuesArrayItem) -> tapir.PropertyValueArrayItem | tapir.ErrorItem:
+    if len(element.propertyValues) != 1:
+        raise ValueError(f"Single property lookup row returned {len(element.propertyValues)} values; expected 1.")
+    return element.propertyValues[0]
+
+
+def _require_length(items: Sequence[Any], expected: int, response_name: str) -> None:
+    if len(items) != expected:
+        raise ValueError(f"{response_name} returned {len(items)} item(s); expected {expected}.")
 
 
 def _to_prop_value(val: Any) -> tapir.PropertyValue:
@@ -36,15 +46,15 @@ def create_element_property_values(
 
     PropertyValue models pass through; None becomes an empty string and other
     values use str(value). No numeric formatting or unit conversion is performed.
-    Inputs must be supported by find_errors. Typed API errors, including nested
-    errors, raise BatchOperationError before conversion. Format errors as strings
-    explicitly when intentionally writing diagnostic text.
+    Typed API errors are rejected before conversion.
     """
-    BatchResult.from_items(values_matrix, root_key="values").raise_for_errors("Property write input")
     norm_elements = normalize_element_ids(elements)
     norm_props = normalize_property_ids(properties)
     if len(norm_elements) != len(values_matrix):
         raise ValueError(f"Expected {len(norm_elements)} rows in values_matrix, got {len(values_matrix)}.")
+    BatchResult2D.from_rows(values_matrix, row_lengths=[len(norm_props)] * len(norm_elements)).raise_for_errors(
+        "Property write input"
+    )
 
     payload: list[tapir.ElementPropertyValue] = []
     for elem, row in zip(norm_elements, values_matrix):
@@ -68,17 +78,57 @@ def create_element_property_values_flat(
 
     PropertyValue models pass through; None becomes an empty string and other
     values use str(value). No numeric formatting or unit conversion is performed.
-    Inputs must be supported by find_errors. Typed API errors, including nested
-    errors, raise BatchOperationError before conversion. Format errors as strings
-    explicitly when intentionally writing diagnostic text.
+    Typed API errors are rejected before conversion.
     """
-    BatchResult.from_items(values, root_key="values").raise_for_errors("Property write input")
     pid = normalize_property_id(property_id).propertyId
     if len(elements) != len(values):
         raise ValueError(f"Expected {len(elements)} rows in values, got {len(values)}.")
+    BatchResult.from_items(values).raise_for_errors("Property write input")
     return [
         tapir.ElementPropertyValue(elementId=e.elementId, propertyId=pid, propertyValue=_to_prop_value(v))
         for e, v in zip(normalize_element_ids(elements), values)
+    ]
+
+
+def create_element_property_values_from_coords(
+    elements: Sequence[ElementIdLike],
+    properties: Sequence[PropertyIdLike],
+    coordinates: Sequence[tuple[int, int]],
+    values: Sequence[Any],
+) -> list[tapir.ElementPropertyValue]:
+    """Build a sparse property-value payload from explicit element/property coordinates."""
+    if len(coordinates) != len(values):
+        raise ValueError("coordinates and values must have the same length.")
+    normalized_elements = normalize_element_ids(elements)
+    normalized_properties = normalize_property_ids(properties)
+    seen: set[tuple[int, int]] = set()
+    normalized_coordinates: list[tuple[int, int]] = []
+    for coordinate in coordinates:
+        if not isinstance(coordinate, Sequence) or isinstance(coordinate, (str, bytes)) or len(coordinate) != 2:
+            raise ValueError("Every coordinate must contain an element and property index.")
+        element_index, property_index = coordinate
+        if not isinstance(element_index, int) or not isinstance(property_index, int):
+            raise TypeError("Property-value coordinates must contain integer indices.")
+        normalized_coordinate = (element_index, property_index)
+        if (
+            element_index < 0
+            or element_index >= len(normalized_elements)
+            or property_index < 0
+            or property_index >= len(normalized_properties)
+        ):
+            raise IndexError("Property-value coordinate is out of bounds.")
+        if normalized_coordinate in seen:
+            raise ValueError("Duplicate property-value coordinate.")
+        seen.add(normalized_coordinate)
+        normalized_coordinates.append(normalized_coordinate)
+    BatchResult.from_items(values).raise_for_errors("Property write input")
+    return [
+        tapir.ElementPropertyValue(
+            elementId=normalized_elements[element_index].elementId,
+            propertyId=normalized_properties[property_index].propertyId,
+            propertyValue=_to_prop_value(value),
+        )
+        for (element_index, property_index), value in zip(normalized_coordinates, values)
     ]
 
 
@@ -110,14 +160,15 @@ class PropertyUtilities:
         self, property_user_ids: Sequence[PropertyUserId]
     ) -> BatchResult[tapir.PropertyIdArrayItem]:
         """Diagnostic batch lookup returning a BatchResult container."""
-        raw = self._api.official.property.get_property_ids(property_user_ids)
-        return BatchResult.from_items(raw, accessor=normalize_property_id, root_key="propertyIds")
+        raw = self._api.official.property.get_property_ids(list(property_user_ids))
+        _require_length(raw, len(property_user_ids), "Property ID lookup")
+        return BatchResult.from_items(raw, accessor=normalize_property_id)
 
     def resolve_property_ids(self, property_user_ids: Sequence[PropertyUserId]) -> list[tapir.PropertyIdArrayItem]:
         """Fail-fast batch lookup returning a clean list of Tapir PropertyId models."""
         res = self.resolve_property_ids_result(property_user_ids)
         res.raise_for_errors("Property ID resolution")
-        return res.successes
+        return list(res.successes)
 
     def resolve_property_id(self, property_user_id: PropertyUserId) -> tapir.PropertyIdArrayItem:
         """Scalar convenience: resolves a single property identifier or raises."""
@@ -125,13 +176,13 @@ class PropertyUtilities:
 
     def get_property_values_per_element_result(
         self, elements: Sequence[ElementIdLike], properties: Sequence[PropertyIdLike]
-    ) -> BatchResult[list[str | tapir.ErrorItem]]:
+    ) -> BatchResult2D[str]:
         """Read display strings: one row per element, with nested ErrorItems on failure."""
         items = self._get_raw_property_values(elements, properties)
-        return BatchResult.from_items(
-            items,
-            accessor=_extract_property_values,
-            root_key="elements",
+        _require_length(items, len(elements), "Property values lookup")
+        rows = [item if extract_error(item) else item.propertyValues for item in items]
+        return BatchResult2D.from_rows(
+            rows, row_lengths=[len(properties)] * len(elements), accessor=_extract_property_value
         )
 
     def get_property_values_per_element(
@@ -143,18 +194,19 @@ class PropertyUtilities:
         """
         res = self.get_property_values_per_element_result(elements, properties)
         res.raise_for_errors("Batch property values read")
-        return res.successes
+        values_by_row: list[list[str]] = [[] for _ in elements]
+        for (row_index, _), value in res.iter_successes():
+            values_by_row[row_index].append(value)
+        return values_by_row
 
     def get_flat_property_values_result(
         self, elements: Sequence[ElementIdLike], property_id: PropertyIdLike
     ) -> BatchResult[str]:
         """Read one property as display strings, retaining per-element failures."""
         property_values = self._get_raw_property_values(elements, [property_id])
-        return BatchResult.from_items(
-            property_values,
-            accessor=lambda el: _extract_property_values(el)[0],
-            root_key="elements",
-        )
+        _require_length(property_values, len(elements), "Single property lookup")
+        items = [item if extract_error(item) else _single_property_item(item) for item in property_values]
+        return BatchResult.from_items(items, accessor=_extract_property_value)
 
     def get_flat_property_values(self, elements: Sequence[ElementIdLike], property_id: PropertyIdLike) -> list[str]:
         """Read one property as display strings; raise on any reported failure.
@@ -163,26 +215,7 @@ class PropertyUtilities:
         """
         res = self.get_flat_property_values_result(elements, property_id)
         res.raise_for_errors("Single property read")
-        return res.successes
-
-    def get_property_values_dict_per_element_result(
-        self,
-        elements: Sequence[ElementIdLike],
-        properties: Sequence[PropertyIdLike],
-        property_names: Optional[Sequence[str]] = None,
-    ) -> BatchResult[dict[str, str | tapir.ErrorItem]]:
-        """Read display strings into per-element dictionaries, retaining nested errors."""
-        keys = (
-            list(property_names)
-            if property_names
-            else [str(normalize_property_id(p).propertyId.guid) for p in properties]
-        )
-        raw = self._get_raw_property_values(elements, properties)
-        return BatchResult.from_items(
-            raw,
-            accessor=lambda el: dict(zip(keys, _extract_property_values(el))),
-            root_key="elements",
-        )
+        return list(res.successes)
 
     def get_property_values_dict_per_element(
         self,
@@ -190,17 +223,27 @@ class PropertyUtilities:
         properties: Sequence[PropertyIdLike],
         property_names: Optional[Sequence[str]] = None,
     ) -> list[dict[str, str]]:
-        """Read per-element dictionaries of display strings; raise on reported failures."""
-        res = self.get_property_values_dict_per_element_result(elements, properties, property_names)
+        """Read complete property rows into dictionaries, failing before partial rows escape."""
+        keys = (
+            list(property_names)
+            if property_names is not None
+            else [str(normalize_property_id(p).propertyId.guid) for p in properties]
+        )
+        if len(keys) != len(properties):
+            raise ValueError("property_names length must match properties length.")
+        res = self.get_property_values_per_element_result(elements, properties)
         res.raise_for_errors("Property dictionary read")
-        return res.successes
+        values_by_row: list[list[str]] = [[] for _ in elements]
+        for (row_index, _), value in res.iter_successes():
+            values_by_row[row_index].append(value)
+        return [dict(zip(keys, values)) for values in values_by_row]
 
     def set_property_values_per_element_result(
         self,
         elements: Sequence[ElementIdLike],
         properties: Sequence[PropertyIdLike],
         values_matrix: Sequence[Sequence[Any]],
-    ) -> BatchResult[list[tapir.SuccessfulExecutionResult | tapir.FailedExecutionResult]]:
+    ) -> BatchResult2D[tapir.SuccessfulExecutionResult]:
         """Write display values, returning one execution-result row per element.
 
         Each row contains one success or failure per requested property. Partial
@@ -210,8 +253,9 @@ class PropertyUtilities:
         n_props = len(properties)
         payload = create_element_property_values(elements, properties, values_matrix)
         raw_res = self._api.tapir.property.set_property_values_of_elements(payload)
+        _require_length(raw_res, len(elements) * len(properties), "Property values write")
         grouped = [raw_res[i * n_props : (i + 1) * n_props] for i in range(len(elements))]
-        return BatchResult.from_items(grouped, root_key="elements")
+        return BatchResult2D.from_rows(grouped, row_lengths=[n_props] * len(elements))
 
     def set_property_values_per_element(
         self,
@@ -242,7 +286,8 @@ class PropertyUtilities:
         """
         payload = create_element_property_values_flat(elements, property_id, values)
         raw_res = self._api.tapir.property.set_property_values_of_elements(payload)
-        return BatchResult.from_items(raw_res, root_key="executionResults")
+        _require_length(raw_res, len(elements), "Single property write")
+        return BatchResult.from_items(raw_res)
 
     def set_flat_property_values(
         self,
@@ -267,15 +312,14 @@ class PropertyUtilities:
         property_definitions = self._api.official.property.get_details_of_properties(
             [to_official_property_id(p) for p in properties]
         )
-        return BatchResult.from_items(
-            property_definitions, accessor=lambda item: item.propertyDefinition, root_key="propertyDefinitions"
-        )
+        _require_length(property_definitions, len(properties), "Property details lookup")
+        return BatchResult.from_items(property_definitions, accessor=lambda item: item.propertyDefinition)
 
     def get_property_details(self, properties: Sequence[PropertyIdLike]) -> list[official.PropertyDefinition]:
         """Fail-fast metadata lookup returning a clean list of PropertyDefinition models."""
         res = self.get_property_details_result(properties)
         res.raise_for_errors("Property details inspection")
-        return res.successes
+        return list(res.successes)
 
     def get_property_types_result(self, properties: Sequence[PropertyIdLike]) -> BatchResult[str]:
         """Diagnostic data type names lookup returning a BatchResult container."""
@@ -285,4 +329,4 @@ class PropertyUtilities:
         """Fail-fast data type names lookup returning a clean list of type name strings."""
         res = self.get_property_types_result(properties)
         res.raise_for_errors("Property types inspection")
-        return res.successes
+        return list(res.successes)

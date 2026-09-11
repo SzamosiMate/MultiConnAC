@@ -50,7 +50,6 @@ from .errors import (
     ProjectNotFoundError,
     NotFullyInitializedError,
     BatchOperationError,
-    UnsupportedResultNode,
 )
 from multiconn_archicad.clients.unified_api.api import UnifiedApi
 
@@ -89,7 +88,6 @@ __all__ = [
     "ProjectNotFoundError",
     "NotFullyInitializedError",
     "BatchOperationError",
-    "UnsupportedResultNode",
     "ProjectIdentityHeader",
     "SessionReadyHeader",
     "ValidatedHeader",

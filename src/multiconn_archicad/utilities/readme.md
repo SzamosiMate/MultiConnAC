@@ -12,14 +12,15 @@ The `utilities` subpackage provides **Level 3 Ergonomic Sugar** on top of `Unifi
 
 ### What Belongs in `utilities`:
 * **Idiomatic Pythonic wrappers** around repetitive Archicad JSON API interactions (e.g., context managers for resource safety).
-* **Batch unwrapping and type coercion** (flattening deeply nested property responses into Python primitives).
-* **Batch result containers (`BatchResult`)** that preserve 1:1 index alignment while isolating partial failures and tracking structural error coordinates across multi-step pipelines.
+* **Batch unwrapping and type coercion** (turning known API response wrappers into Python primitives).
+* **Batch result containers** (`BatchResult`, `BatchResult2D`) that preserve explicit one- and two-dimensional alignment while isolating partial failures.
+* **Workflow accumulation** (`BatchRun`) that collects failures from multiple steps against the original input items.
 * **Universal identifier constructors and normalizers** (e.g., GUID strings / UUIDs $\to$ typed `ElementIdArrayItem` / `PropertyIdArrayItem`).
 
 ### What Does NOT Belong in `utilities`:
 * **Thin Pass-Through Wrappers:** Functions that merely forward already-constructed CAD models into single API endpoints without normalization, unnesting, or transformation are strictly prohibited.
 * **Domain / Business Logic:** Company-specific layer naming, property naming conventions, or pipeline rules belong in downstream applications.
-* **In-Memory Caching:** `utilities` is strictly **100% stateless**. Caching mutable CAD state leads to cache-invalidation bugs in collaborative (Teamwork) environments; caching policies belong in UI view-models or application pipelines using `functools` or `cachetools`.
+* **In-Memory Caching:** API-bound utilities do not cache CAD state. `BatchRun` is an explicit, short-lived workflow record; it is not a CAD-state cache. Caching policies belong in UI view-models or application pipelines using `functools` or `cachetools`.
 * **Heavy Geometric Engines:** Zero `shapely`, CAD polygon clipping, or spatial containment routines.
 * **IFC Dependencies:** Zero dependencies on `ifcopenshell`. IFC mappings belong in downstream packages.
 * **Transport / Protocol Logic:** Low-level HTTP/socket handling belongs in `core` and `UnifiedApi`.
@@ -30,7 +31,7 @@ The `utilities` subpackage provides **Level 3 Ergonomic Sugar** on top of `Unifi
 
 ### A. Bound Operations and Pure Helpers
 * API-dependent operations are methods on domain groups such as `PropertyUtilities`, bound to one `UnifiedApi`. They store only the API reference and do not cache BIM data. Payload builders, identifier normalizers, and extractors remain standalone pure functions.
-* **Classes:** API-bound utility groups, result containers (`BatchResult`, `BatchError`), and resource lifecycle context managers (e.g., planned `TeamworkReserve`) are permitted.
+* **Classes:** API-bound utility groups, explicit result/run containers (`BatchResult`, `BatchResult2D`, `BatchRun`), and resource lifecycle context managers (e.g., planned `TeamworkReserve`) are permitted.
 * **No "Active Record" Objects:** Never wrap an Archicad element in a stateful class with instance methods (e.g., `element.get_property()`). This encourages iterative $N+1$ socket calls, severely degrading CAD performance.
 
 ### B. The Dedicated Dual-Method Convention
@@ -44,7 +45,7 @@ To serve both fast-prototyping scripts and large-scale, eager batch pipelines (e
 2. **Diagnostic Variant (`<name>_result`):**
    * **Target:** Telemetry, automated QA checkers, GUI viewers, and multi-step eager batch pipelines.
    * **Behavior:** **Retains reported partial failures.** Preserves 1:1 index alignment and stores structured `BatchError` entries. Invalid inputs, transport failures, and whole-command errors can still raise.
-   * **Return Types:** Always returns `BatchResult[T]`.
+   * **Return Types:** Returns `BatchResult[T]` for one-dimensional operations and `BatchResult2D[T]` for matrix operations.
 3. **Scalar Convenience (`<name>` singular):**
    * Provided where intuitive (e.g., `resolve_property_id`), simply delegating to the batch form: `self.resolve_property_ids([uid])[0]`.
 
@@ -63,7 +64,7 @@ Archicad JSON API is optimized for bulk operations.
 2. **Return Types:**
    * Fail-fast queries return concrete collections (`list[T]`, `dict[K, V]`).
    * Property mutations return `int` (written property value count) when all succeed.
-   * Diagnostic variants return `BatchResult[T]`.
+   * Diagnostic variants return `BatchResult[T]` or `BatchResult2D[T]`, matching the operation shape.
    * Default to standard Python primitives (`str`, `float`, `int`, `bool`, `None`) or standard typed models.
 
 ### E. Public Access and Consistent Signatures
@@ -74,7 +75,7 @@ standalone forwarding functions. The former `operation(api, ...)` calling style 
 replaced by `api.utilities.property.operation(...)`.
 
 ```python
-from multiconn_archicad.utilities import Utilities, BatchResult
+from multiconn_archicad.utilities import Utilities, BatchResult, BatchResult2D, BatchRun
 from multiconn_archicad.utilities.properties import create_element_property_values_flat
 
 utils = api.utilities
@@ -88,8 +89,9 @@ utils = Utilities(api)
 payload = create_element_property_values_flat(elements, property_id, values)
 ```
 
-The package explicitly exports `Utilities`, `BatchResult`, `BatchError`, and
-`BatchOperationError`. Import pure helpers directly from their defining modules.
+The package explicitly exports `Utilities`, `BatchResult`, `BatchResult2D`,
+`BatchError`, `BatchRun`, and `BatchOperationError`. Import pure helpers directly
+from their defining modules.
 `PropertyUtilities` can be imported from the `properties` module for direct
 construction in tests.
 
@@ -120,7 +122,8 @@ src/multiconn_archicad/utilities/
 ├── __init__.py           # Small public export surface
 ├── api.py                # Utilities domain-group container
 ├── readme.md             # This document
-├── results.py            # BatchResult, BatchError, find_errors, BatchOperationError
+├── results.py            # BatchResult, BatchResult2D, BatchError
+├── batch_run.py          # BatchRun and workflow outcome records
 ├── identifiers.py        # Liberal type aliases & universal ID normalizers
 ├── properties.py         # Batch property reading, writing, and inspection
 ├── elements.py           # Planned: selection get/set, type filtering
@@ -145,20 +148,18 @@ Value reads use Tapir **display strings**, including numeric properties. They do
 parse numbers or normalize units. Code performing calculations must explicitly
 interpret the returned text. Writes preserve `tapir.PropertyValue` instances,
 convert `None` to `""`, and otherwise use `str(value)`; this does not perform unit
-conversion. Before conversion, both payload builders scan inputs with
-`BatchResult.from_items(..., root_key="values").raise_for_errors(...)`.
-Typed API errors, including nested errors, raise `BatchOperationError` with input
-coordinates (for example, `values[3][2]`) before any API call. Unsupported types
-raise `UnsupportedResultNode`; inputs must follow the `find_errors` type contract.
-This input validation also applies to diagnostic `_result` setters. To intentionally
-write an error report, first format the error as a string, such as
+conversion. Before conversion, payload builders reject direct typed API-error
+slots with `BatchOperationError`; other values are opaque and follow the
+conversion rules above. This validation applies to all write helpers. To
+intentionally write an error report, first format the error as a string, such as
 `f"[{error.code}] {error.message}"`.
 
 Matrix operations use one outer result slot per element and one inner slot per
-property. For two elements and three properties, the diagnostic write returns two
+property. For two elements and three properties, the result write returns two
 rows of three execution results, while the raising setter returns `6` if all
-writes succeed. Flat operations use one result slot per element. Utilities trust
-the client/API response ordering and shape rather than revalidating every response.
+writes succeed. Flat operations use one result slot per element. Every adapter
+validates outer and inner response cardinality, including empty input and
+zero-property matrix cases.
 
 The following resolution, read, write, and metadata operations are methods on
 `api.utilities.property`. Payload builders and `get_possible_enum_values` remain
@@ -168,12 +169,12 @@ module-level functions.
   * `resolve_property_ids(...) -> list[PropertyIdArrayItem]` / `resolve_property_ids_result(...) -> BatchResult`
   * `resolve_property_id(...) -> PropertyIdArrayItem` (scalar helper)
 * **Reading (2D Engine + 1D/Dict Conveniences):**
-  * `get_property_values_per_element(...) -> list[list[str]]` / `..._result(...) -> BatchResult`
+  * `get_property_values_per_element(...) -> list[list[str]]` / `..._result(...) -> BatchResult2D`
   * `get_flat_property_values(...) -> list[str]` / `..._result(...) -> BatchResult`
-  * `get_property_values_dict_per_element(...) -> list[dict[str, str]]` / `..._result(...) -> BatchResult`
+  * `get_property_values_dict_per_element(...) -> list[dict[str, str]]`
 * **Writing (2D Engine + 1D Convenience):**
   * `create_element_property_values` / `create_element_property_values_flat`: Pure payload builders converting primitives to CAD mutation models.
-  * `set_property_values_per_element(...) -> int` / `..._result(...) -> BatchResult`
+  * `set_property_values_per_element(...) -> int` / `..._result(...) -> BatchResult2D`
   * `set_flat_property_values(...) -> int` / `..._result(...) -> BatchResult`
 * **Inspection:**
   * `get_property_details(...) -> list[PropertyDefinition]` / `..._result(...) -> BatchResult`
@@ -182,146 +183,76 @@ module-level functions.
 
 ---
 
-## 6. Batch Error Handling & Results: `BatchResult[T]`
+## 6. Batch Error Handling & Results
 
-In large-scale CAD operations (e.g., updating 100,000 properties), all-or-nothing execution is unacceptable: one element on a locked layer or an unplaced door would abort the entire batch. `BatchResult[T]` provides an eager, resilient container designed for multi-step data pipelines.
+`BatchResult[T]` is an immutable one-dimensional result. Each slot holds a successful value or a normalized `BatchError`; `iter_successes()` and `iter_errors()` provide its integer index. `BatchResult2D[T]` is an immutable ragged matrix. It stores the supplied length for each row, including a whole-row error. Matrix errors are located at `(row, column)` or `(row, None)`. Successful values are opaque; only the result's declared slots are interpreted as outcomes.
 
-### The Contract of `BatchResult[T]`
-* **Shallow freezing:** `@dataclass(frozen=True)` prevents field reassignment. Contained lists, dictionaries, and models remain mutable and may be shared between branches. Container methods do not mutate their inputs; callers and callbacks must also avoid mutating shared data. Deep immutability and thread safety are not guaranteed.
-* **Strict Index Alignment:** `len(result.items) == len(input_items)`. Index $i$ always corresponds to item $i$.
-* **Typed Error Preservation in `items`:** Failed slots in `result.items` preserve the **raw Error container model** (`ErrorItem`, `FailedExecutionResult`). Composite items retain nested errors. A successful `map()` projection can discard errors from branches it does not return; this container is not a complete audit log.
-* **Padded Fallback (`.items_or(fallback)`):** When consuming code requires a padded primitive list (e.g., for GUI tables or export matrices), calling `.items_or(None)` returns a sequence with all failed indices replaced by `fallback`.
-* **Multi-Error Mapping:** `result.errors: Mapping[int, tuple[BatchError, ...]]` maps each batch index to all errors that occurred on it.
-* **Clean Success Slices:**
-  * `result.successes`: Returns only items with zero errors anywhere in their evaluation tree.
-  * `result.success_indices`: Returns an immutable tuple of integer indices (`tuple[int, ...]`) of all healthy items.
-* **Truthiness:** `bool(result)` evaluates to `True` **only** if every item in the batch succeeded without error (`is_all_success`).
-* **Fail-Fast Trigger:** `result.raise_for_errors(op_name)` raises a consolidated `BatchOperationError` detailing coordinate paths, error codes, and messages, with `err.result` attached.
-
----
-
-### Universal Factory: `BatchResult.from_items`
-
-A single factory handles flat 1D sequences, 2D matrices, composite models, and mutation results:
-```python
-# Queries / Reads:
-BatchResult.from_items(raw_response, accessor=..., root_key="elements")
-
-# Mutations / Writes:
-BatchResult.from_items(execution_results, root_key="executionResults")
-```
-It utilizes `find_errors(node, path, indices)` to recursively traverse Pydantic models, lists/tuples, and dictionary values, extracting `BatchError` instances with coordinate paths (e.g., `elements[3].propertyValues[1]` or `elements[3]['FireRating']`). Dictionary keys appear in paths, while `indices` contains only list/tuple positions. Only typed API error models are recognized as errors; a plain dictionary containing `code` and `message` is ordinary data.
-
----
-
-### Multi-Step Waterfall Pipelines (Railway-Oriented Processing)
-
-When building multi-step pipelines (Read $\to$ Transform $\to$ Write $\to$ Report), `BatchResult` prevents **Index Drift** (where filtering out failed items shrinks the array and decouples indices from the original inputs).
-
-```text
-Master Coordinates (N=10,000)
-    │
-    ├─ Step 1: Read (returns BatchResult of 10,000)
-    │
-    ├─ Step 2: Transform (.map() transforms values, absorbs calculation bugs)
-    │
-    ├─ Branching (Fork/Join):
-    │     ├── Branch 3A: Write Property A ──> .realign() ──> 10,000 slots
-    │     └── Branch 3B: Write Property B ──> .realign() ──> 10,000 slots
-    │     └── Joined via .zip()           ──> Intersection of successes (10,000 slots)
-    │
-    ├─ Step 4: Write Final Result ──────────> .realign() ──> 10,000 slots
-    │
-    └─ Step 5: Unified Error Report (Every step's errors aligned to Master Index i)
-```
-
-#### 1. Resilient Transformation (`.map(fn)`)
-Transforms healthy items while safely navigating around broken branches:
-* **Healthy items:** Evaluated via `fn(item)`.
-* **Direct error models:** Passed through untouched without executing `fn`.
-* **Composite items with partial errors:** `fn(item)` is attempted. An `AttributeError` whose target contains a recorded API error promotes that original error container and preserves its original coordinates. Identity of the contained API error links the exception to the recorded failure. Unrelated attribute errors and key/index/type errors follow the calculation-error policy.
-* **Computation safety:** Callback exceptions become calculation errors by default; `catch_calc_errors=False` lets them propagate. Supported return values are rescanned, so a clean projection clears unselected errors. Unsupported return types raise `UnsupportedResultNode` regardless of this flag.
-
-#### 2. Splicing Sub-Batches Back to Master Coordinates (`.realign()`)
-When writing to Archicad, you must not send failed elements over the socket. You filter the inputs, send the sub-batch ($K \le N$), and use `.realign()` to scatter the results back into the master array.
+`map()` transforms only successful slots and lets callback exceptions propagate. `flatten()` preserves row-major cell coordinates. Its ordinary form returns a flat `BatchResult`; `skip_errors=True` returns successful values and coordinates and permits whole-row errors.
 
 ```python
-# Sub-batch write (only sends the 9,800 healthy items)
-valid_elements = step2.filter_successful(elements)
-sub_res = api.utilities.property.set_flat_property_values_result(valid_elements, prop_area, step2.successes)
-
-# Realign scatters the 9,800 results back into the 10,000-element master track.
-# By default, indices=step2.success_indices automatically!
-step3 = step2.realign(sub_res, step_name="writeArea")
-
-assert len(step3.items) == 10000  # Index alignment perfectly preserved!
+result = api.utilities.property.get_flat_property_values_result(elements, property_id)
+for element_index, value in result.iter_successes():
+    print(element_index, value)
+for element_index, error in result.iter_errors():
+    print(element_index, error.code, error.message)
 ```
-* **Preserves history:** All prior errors are retained, including errors at explicitly targeted retry indices. A successful retry currently does not clear an earlier failure or restore that index to `success_indices`.
-* **Re-indexes coordinates:** Sub-batch error coordinates are re-mapped to their master index ($0 \dots N-1$).
 
-#### 3. Fork-Join Branch Merging (`.zip()`)
-When two parallel branches run (e.g., writing Fire Rating in 3A and Acoustic Rating in 3B), both realign to master length $N$. You then `.zip()` them:
-```python
-# Joins two parallel branches of length N
-step3_joined = step3_a.zip(step3_b)
-```
-* **Items paired:** `(item_a, item_b)`.
-* **Errors unioned:** Merges errors from both branches, deduplicating shared ancestor errors.
-* **Successes intersected:** `step3_joined.success_indices` contains **only** elements that succeeded in *both* branches.
-
----
-
-### Masking & Filtering Parameters
-
-To correlate external data sequences with batch results without altering container shapes:
+A partial matrix copy sends only successful cells while preserving their input coordinates:
 
 ```python
-res = api.utilities.property.set_property_values_per_element_result(panels, properties, matrix)
-
-# Padded masks (preserves original input length, replaces failures/successes with fallback):
-res.success_mask(panels)              # ["Wall_A", None, "Wall_C"]
-res.failure_mask(panels)              # [None, "Wall_B", None]
-
-# Filtered slices (omits items entirely; ideal for sub-batch inputs):
-res.filter_successful(panels)         # ["Wall_A", "Wall_C"]
-res.filter_failed(panels)             # ["Wall_B"]
+run = BatchRun(elements)
+read = api.utilities.property.get_property_values_per_element_result(elements, source_properties)
+run.record("read", read)
+values, coords = read.flatten(skip_errors=True)
+payload = create_element_property_values_from_coords(elements, target_properties, coords, values)
+write = BatchResult.from_items(api.tapir.property.set_property_values_of_elements(payload))
+run.record("copy", write, item_indices=[row for row, _ in coords], details=coords)
+outcomes = run.finish()
 ```
+
+`BatchRun` accumulates step failures against the original items. Before `finish()`, error-free items are incomplete; `finish()` marks them succeeded and closes the run. `abort(exception)` closes the run with a fatal error and leaves otherwise clean items incomplete. Start a new `BatchRun` for an explicit retry; completed runs never replace or erase earlier outcomes.
+
+```python
+terminal_codes = {4010}  # The application decides which API errors are terminal.
+retry_items = []
+for outcome in outcomes:
+    if outcome.succeeded:
+        accept(outcome.original_item)
+    elif any(failure.error.code in terminal_codes for failure in outcome.failures):
+        reject(outcome.original_item, outcome.failures)
+    else:
+        retry_items.append(outcome.original_item)
+
+retry = BatchRun(retry_items)
+# Record fresh retry steps on `retry`; the completed run remains unchanged.
+```
+
+The recursive scanner, `root_key`, `items_or`, masks/filtering helpers, `realign`, `zip`, caught calculation errors, diagnostic dictionary result methods, and retry/history replacement were removed. A future UI can show consolidated outcome counts first, then expandable step and coordinate-level failure details.
 
 ---
 
 ## 7. Testing Strategy
 
-We maintain a strict **2-Tier Testing Strategy**:
+Tests run offline with real official and Tapir Pydantic models and mocked API responses:
 
 ```text
-tests/utilities/
-├── unit/                       # Tier 1: 100% Offline, runs on CI (<1s)
-│   ├── test_identifiers.py     # Pure conversions, UUID parsing, type unions
-│   ├── test_utilities_api.py   # Namespace and independent API bindings
-│   ├── test_results.py         # BatchResult contracts, tree errors, masking
-│   ├── test_results_map.py     # Projection and calculation errors
-│   ├── test_results_realign.py # Sub-batch alignment and history
-│   ├── test_results_zip.py     # Branch joining and error merging
-│   └── test_properties.py      # Contract tests with real Pydantic fixtures & mocks
-└── integration/                # Planned Tier 2: Live Archicad tests (Local / Opt-in)
-    └── test_properties_live.py # Real socket calls against a running Archicad project
+tests/utilities/unit/
+├── test_identifiers.py
+├── test_batch_results_v2.py  # 1D/2D result and BatchRun contracts
+└── test_properties_v2.py     # payloads, cardinality, and partial-copy pipeline
 ```
 
-1. **Tier 1 (Unit Tests):**
-   * Must run completely offline with zero Archicad or network dependencies.
-   * Uses real Pydantic models from `official` and `tapir` for mock return data to ensure schema fidelity.
-   * Validates full successes, root failures, inner/nested errors, array splicing (`realign`), and branch merging (`zip`).
-2. **Tier 2 (Live Tests):**
-   * Marked with `@pytest.mark.live`.
-   * Automatically skips (`pytest.skip()`) if local Archicad instance is unreachable so CI pipelines remain green.
+The result tests cover direct typed errors, ragged and whole-row matrix failures, flattening, mapping, outcome closure, and atomic recording. Property tests cover scalar and matrix response cardinality, dictionary fail-fast behavior, sparse coordinate payloads, and partial writes.
 
 ---
 
 ## 8. Planned Enhancements / Roadmap
 
-* **Retry support:** Define how a successful explicit retry clears an active failure while retaining useful history. This is lower priority: many Archicad failures need human intervention before retrying. No automatic retry loop is currently provided.
+* **Retry support:** Provide UI guidance for starting a separate `BatchRun` from failed original items. No automatic retry loop is provided.
 
 * **`utils.property.get_available_property_ids_of_elements(elements)`**: Query Archicad's `GetAllPropertyNamesOfElements` to check property availability by Classification before executing writes.
 * **`elements.py`**: Batch selection getter/setter, element type filtering (e.g., 3D element queries).
 * **`attributes.py`**: Layer combinations and visible layer extractors.
 * **`teamwork.py`**: Context manager for safe element reservation and automatic sending.
+
+---
