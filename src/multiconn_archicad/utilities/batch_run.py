@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeVar, cast
+from enum import Enum
+from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 from .results import BatchError, BatchResult, BatchResult2D
 
 T = TypeVar("T")
-R = TypeVar("R", BatchResult[Any], BatchResult2D[Any])
+BatchResultType: TypeAlias = BatchResult[Any] | BatchResult2D[Any]
+RecordedResult = TypeVar("RecordedResult", bound=BatchResultType)
+
+
+class BatchStatus(str, Enum):
+    INCOMPLETE = "incomplete"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,39 +54,62 @@ class BatchOutcome(Generic[T]):
     original_item: T
     index: int
     failures: tuple[BatchFailure, ...]
-    status: Literal["failed", "succeeded", "incomplete"]
+    status: BatchStatus
 
     @property
     def failed(self) -> bool:
-        return self.status == "failed"
+        return self.status is BatchStatus.FAILED
 
     @property
     def succeeded(self) -> bool:
-        return self.status == "succeeded"
+        return self.status is BatchStatus.SUCCEEDED
 
     @property
     def incomplete(self) -> bool:
-        return self.status == "incomplete"
+        return self.status is BatchStatus.INCOMPLETE
+
+
+@dataclass(frozen=True, slots=True)
+class BatchReport(Generic[T]):
+    """A complete, immutable snapshot of a batch workflow."""
+
+    outcomes: tuple[BatchOutcome[T], ...]
+    steps: tuple[BatchStep[Any], ...]
+    status: BatchStatus
+    fatal_error: Exception | None = None
+
+    @property
+    def failed_indices(self) -> tuple[int, ...]:
+        return tuple(outcome.index for outcome in self.outcomes if outcome.failed)
+
+    @property
+    def incomplete_indices(self) -> tuple[int, ...]:
+        return tuple(outcome.index for outcome in self.outcomes if outcome.incomplete)
+
+    @property
+    def status_counts(self) -> Mapping[str, int]:
+        return {
+            "total": len(self.outcomes),
+            "failed": sum(outcome.failed for outcome in self.outcomes),
+            "succeeded": sum(outcome.succeeded for outcome in self.outcomes),
+            "incomplete": sum(outcome.incomplete for outcome in self.outcomes),
+        }
 
 
 @dataclass(slots=True)
 class BatchRun(Generic[T]):
     """Accumulate failures against the original input without losing repeats."""
 
-    original_items: tuple[T, ...]
+    original_items: Sequence[T]
     _steps: list[BatchStep[Any]] = field(default_factory=list, init=False, repr=False)
     _failures: list[list[BatchFailure]] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _aborted: bool = field(default=False, init=False, repr=False)
     _fatal_error: Exception | None = field(default=None, init=False, repr=False)
 
-    def __init__(self, original_items: Sequence[T]):
-        self.original_items = tuple(original_items)
-        self._steps = []
+    def __post_init__(self) -> None:
+        self.original_items = tuple(self.original_items)
         self._failures = [[] for _ in self.original_items]
-        self._closed = False
-        self._aborted = False
-        self._fatal_error = None
 
     @property
     def steps(self) -> tuple[BatchStep[Any], ...]:
@@ -89,36 +120,33 @@ class BatchRun(Generic[T]):
         return self._fatal_error
 
     @property
+    def report(self) -> BatchReport[T]:
+        """Return an immutable snapshot of the current workflow state."""
+        return self._build_report()
+
+    @property
     def outcomes(self) -> tuple[BatchOutcome[T], ...]:
         values: list[BatchOutcome[T]] = []
         for index, item in enumerate(self.original_items):
-            status: Literal["failed", "succeeded", "incomplete"]
+            status: BatchStatus
             if self._failures[index]:
-                status = "failed"
+                status = BatchStatus.FAILED
             elif self._closed and not self._aborted:
-                status = "succeeded"
+                status = BatchStatus.SUCCEEDED
             else:
-                status = "incomplete"
+                status = BatchStatus.INCOMPLETE
             values.append(BatchOutcome(item, index, tuple(self._failures[index]), status))
         return tuple(values)
 
-    @property
-    def failed_indices(self) -> tuple[int, ...]:
-        return tuple(item.index for item in self.outcomes if item.failed)
-
-    @property
-    def incomplete_indices(self) -> tuple[int, ...]:
-        return tuple(item.index for item in self.outcomes if item.incomplete)
-
-    @property
-    def status_counts(self) -> Mapping[str, int]:
+    def _build_report(self) -> BatchReport[T]:
         outcomes = self.outcomes
-        return {
-            "total": len(outcomes),
-            "failed": sum(item.failed for item in outcomes),
-            "succeeded": sum(item.succeeded for item in outcomes),
-            "incomplete": sum(item.incomplete for item in outcomes),
-        }
+        if self._aborted or any(outcome.failed for outcome in outcomes):
+            status = BatchStatus.FAILED
+        elif self._closed:
+            status = BatchStatus.SUCCEEDED
+        else:
+            status = BatchStatus.INCOMPLETE
+        return BatchReport(outcomes, self.steps, status, self._fatal_error)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -127,26 +155,15 @@ class BatchRun(Generic[T]):
     def record(
         self,
         name: str,
-        result: R,
+        result: RecordedResult,
         *,
         item_indices: Sequence[int] | None = None,
         details: Sequence[Any] | None = None,
-    ) -> R:
+    ) -> RecordedResult:
         """Record a step atomically and return the original result object."""
-        self._ensure_open()
-        source_count = len(result.slots) if isinstance(result, BatchResult) else len(result.rows)
-        if item_indices is None and source_count != len(self.original_items):
-            raise ValueError("Default item_indices requires one slot/row per original item.")
-        indices = tuple(range(source_count)) if item_indices is None else tuple(item_indices)
-        if len(indices) != source_count:
-            raise ValueError("item_indices length must match result slots or rows.")
-        if any(not isinstance(index, int) or index < 0 or index >= len(self.original_items) for index in indices):
-            raise IndexError("item_indices contains an original-item index out of bounds.")
-        extra = (None,) * source_count if details is None else tuple(details)
-        if len(extra) != source_count:
-            raise ValueError("details length must match result slots or rows.")
+        indices, extra = self._validate_record_inputs(result, item_indices, details)
 
-        step = BatchStep(name, len(self._steps), result, indices, extra)
+        step: BatchStep[Any] = BatchStep(name, len(self._steps), result, indices, extra)
         staged: list[tuple[int, BatchFailure]] = []
         if isinstance(result, BatchResult):
             for source_index, error in result.iter_errors():
@@ -161,14 +178,34 @@ class BatchRun(Generic[T]):
             self._failures[target].append(failure)
         return result
 
-    def finish(self) -> tuple[BatchOutcome[T], ...]:
+    def _validate_record_inputs(
+        self,
+        result: BatchResultType,
+        item_indices: Sequence[int] | None,
+        details: Sequence[Any] | None,
+    ) -> tuple[tuple[int, ...], tuple[Any, ...]]:
+        self._ensure_open()
+        source_count = len(result.slots) if isinstance(result, BatchResult) else len(result.rows)
+        if item_indices is None and source_count != len(self.original_items):
+            raise ValueError("Default item_indices requires one slot/row per original item.")
+        indices = tuple(range(source_count)) if item_indices is None else tuple(item_indices)
+        if len(indices) != source_count:
+            raise ValueError("item_indices length must match result slots or rows.")
+        if any(not isinstance(index, int) or index < 0 or index >= len(self.original_items) for index in indices):
+            raise IndexError("item_indices contains an original-item index out of bounds.")
+        extra = (None,) * source_count if details is None else tuple(details)
+        if len(extra) != source_count:
+            raise ValueError("details length must match result slots or rows.")
+        return indices, extra
+
+    def finish(self) -> BatchReport[T]:
         self._ensure_open()
         self._closed = True
-        return self.outcomes
+        return self.report
 
-    def abort(self, exception: Exception) -> tuple[BatchOutcome[T], ...]:
+    def abort(self, exception: Exception) -> BatchReport[T]:
         self._ensure_open()
         self._closed = True
         self._aborted = True
         self._fatal_error = exception
-        return self.outcomes
+        return self.report

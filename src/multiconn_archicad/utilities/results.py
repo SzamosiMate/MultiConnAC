@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Iterator, Literal, TypeAlias, TypeVar, cast, overload
+from typing import Any, Generic, Iterator, TypeAlias, TypeVar, cast
 
 from multiconn_archicad.errors import BatchOperationError
 from multiconn_archicad.models.official import types as official
@@ -24,15 +24,13 @@ ERROR_CONTAINER_MODELS = (
 )
 
 
-def extract_error(item: Any) -> ErrorType | None:
-    if isinstance(item, ERROR_CONTAINER_MODELS):
-        return item.error
-    return item if isinstance(item, (tapir.Error, official.Error)) else None
-
-
 @dataclass(frozen=True, slots=True)
 class BatchError:
     error: ErrorType
+    causes: tuple[BatchError, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "causes", tuple(self.causes))
 
     @property
     def code(self) -> int | str:
@@ -42,11 +40,33 @@ class BatchError:
     def message(self) -> str:
         return self.error.message
 
+    @classmethod
+    def aggregate(cls, errors: Sequence[BatchError], *, context: str = "Batch") -> BatchError:
+        """Create one summary error while retaining the original errors as causes."""
+        causes = tuple(errors)
+        if not causes:
+            raise ValueError("Cannot aggregate an empty error sequence.")
+        summary = "; ".join(f"[{error.code}] {error.message}" for error in causes)
+        return cls(
+            tapir.Error(code=-1, message=f"{context} contains {len(causes)} error(s): {summary}"),
+            causes=causes,
+        )
+
     def __str__(self) -> str:
         return f"[{self.code}] {self.message}"
 
 
+def extract_error(item: Any) -> ErrorType | None:
+    if isinstance(item, BatchError):
+        return item.error
+    if isinstance(item, ERROR_CONTAINER_MODELS):
+        return item.error
+    return item if isinstance(item, (tapir.Error, official.Error)) else None
+
+
 def normalize_error(item: Any) -> BatchError | None:
+    if isinstance(item, BatchError):
+        return item
     error = extract_error(item)
     return BatchError(error) if error is not None else None
 
@@ -61,6 +81,13 @@ class BatchSlot(Generic[T]):
     def __post_init__(self) -> None:
         if (self.value is _MISSING) == (self.error is None):
             raise ValueError("A BatchSlot must contain exactly one of value or error.")
+
+    @property
+    def success_value(self) -> T:
+        """Return the value, enforcing that this slot is successful."""
+        if self.error is not None or self.value is _MISSING:
+            raise ValueError("This slot does not contain a successful value.")
+        return cast(T, self.value)
 
     @property
     def is_success(self) -> bool:
@@ -86,7 +113,7 @@ class BatchResult(Generic[T]):
 
     @property
     def items(self) -> tuple[T | BatchError, ...]:
-        return tuple(slot.error if slot.error else cast(T, slot.value) for slot in self.slots)
+        return tuple(slot.error if slot.error is not None else slot.success_value for slot in self.slots)
 
     @property
     def errors(self) -> tuple[BatchError, ...]:
@@ -97,13 +124,13 @@ class BatchResult(Generic[T]):
         return self.errors
 
     @property
-    def successes(self) -> tuple[T, ...]:
-        return tuple(cast(T, slot.value) for slot in self.slots if slot.error is None)
+    def successes(self) -> list[T]:
+        return [slot.success_value for slot in self.slots if slot.error is None]
 
     def iter_successes(self) -> Iterator[tuple[int, T]]:
         for index, slot in enumerate(self.slots):
             if slot.error is None:
-                yield index, cast(T, slot.value)
+                yield index, slot.success_value
 
     def iter_errors(self) -> Iterator[tuple[int, BatchError]]:
         for index, slot in enumerate(self.slots):
@@ -134,7 +161,7 @@ class BatchResult(Generic[T]):
         """Maps successes only; callback exceptions deliberately propagate."""
         return BatchResult(
             tuple(
-                BatchSlot(value=fn(cast(T, slot.value))) if slot.error is None else BatchSlot(error=slot.error)
+                BatchSlot(value=fn(slot.success_value)) if slot.error is None else BatchSlot(error=slot.error)
                 for slot in self.slots
             )
         )
@@ -222,10 +249,8 @@ class BatchResult2D(Generic[T]):
         return not self.has_errors
 
     def iter_successes(self) -> Iterator[tuple[ValueCoordinate, T]]:
-        for row_index, row in enumerate(self.rows):
-            for cell_index, slot in enumerate(row):
-                if slot.error is None:
-                    yield (row_index, cell_index), cast(T, slot.value)
+        for coordinate, slot in self._iter_flattened_cells(successes_only=True):
+            yield coordinate, slot.success_value
 
     def iter_errors(self) -> Iterator[tuple[ErrorCoordinate, BatchError]]:
         for row_index, row in enumerate(self.rows):
@@ -251,13 +276,15 @@ class BatchResult2D(Generic[T]):
 
     @property
     def items(self) -> tuple[tuple[T | BatchError, ...], ...]:
-        return tuple(tuple(slot.error if slot.error else cast(T, slot.value) for slot in row) for row in self.rows)
+        return tuple(
+            tuple(slot.error if slot.error is not None else slot.success_value for slot in row) for row in self.rows
+        )
 
     def map(self, fn: Callable[[T], U]) -> BatchResult2D[U]:
         return BatchResult2D(
             tuple(
                 tuple(
-                    BatchSlot(value=fn(cast(T, slot.value))) if slot.error is None else BatchSlot(error=slot.error)
+                    BatchSlot(value=fn(slot.success_value)) if slot.error is None else BatchSlot(error=slot.error)
                     for slot in row
                 )
                 for row in self.rows
@@ -266,31 +293,27 @@ class BatchResult2D(Generic[T]):
             self.row_errors,
         )
 
-    @overload
-    def flatten(self, *, skip_errors: Literal[False] = False) -> tuple[BatchResult[T], tuple[ValueCoordinate, ...]]: ...
-
-    @overload
-    def flatten(self, *, skip_errors: Literal[True]) -> tuple[tuple[T, ...], tuple[ValueCoordinate, ...]]: ...
-
-    def flatten(
-        self, *, skip_errors: bool = False
-    ) -> tuple[BatchResult[T], tuple[ValueCoordinate, ...]] | tuple[tuple[T, ...], tuple[ValueCoordinate, ...]]:
-        if any(error is not None for error in self.row_errors) and not skip_errors:
-            raise ValueError("Cannot flatten a matrix containing whole-row errors; pass skip_errors=True.")
-        flattened: list[BatchSlot[T]] = []
-        coordinates: list[ValueCoordinate] = []
+    def _iter_flattened_cells(self, *, successes_only: bool) -> Iterator[tuple[ValueCoordinate, BatchSlot[T]]]:
+        """Yield cells using one shared filtering policy for all flatten helpers."""
+        if not successes_only and any(error is not None for error in self.row_errors):
+            raise ValueError("Cannot flatten a matrix containing whole-row errors.")
         for row_index, row in enumerate(self.rows):
             for cell_index, slot in enumerate(row):
-                coordinate = (row_index, cell_index)
-                if slot.error is None:
-                    flattened.append(BatchSlot(value=slot.value))
-                    coordinates.append(coordinate)
-                elif not skip_errors:
-                    flattened.append(BatchSlot(error=slot.error))
-                    coordinates.append(coordinate)
-        if skip_errors:
-            return tuple(cast(T, slot.value) for slot in flattened), tuple(coordinates)
-        return BatchResult(tuple(flattened)), tuple(coordinates)
+                if successes_only and slot.error is not None:
+                    continue
+                yield (row_index, cell_index), slot
+
+    def flatten(self) -> BatchResult[T]:
+        """Flatten successful rows into one row-major result, retaining cell errors."""
+        return BatchResult(tuple(slot for _, slot in self._iter_flattened_cells(successes_only=False)))
+
+    def flatten_successes(self) -> list[T]:
+        """Return successful cells in row-major order, omitting failed rows and cells."""
+        return [slot.success_value for _, slot in self._iter_flattened_cells(successes_only=True)]
+
+    def coordinates(self) -> tuple[ValueCoordinate, ...]:
+        """Return coordinates corresponding exactly to :meth:`flatten_successes`."""
+        return tuple(coordinate for coordinate, _ in self._iter_flattened_cells(successes_only=True))
 
     def raise_for_errors(self, operation_name: str = "Batch operation") -> None:
         if self.has_errors:

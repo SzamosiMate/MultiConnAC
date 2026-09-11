@@ -150,16 +150,17 @@ interpret the returned text. Writes preserve `tapir.PropertyValue` instances,
 convert `None` to `""`, and otherwise use `str(value)`; this does not perform unit
 conversion. Before conversion, payload builders reject direct typed API-error
 slots with `BatchOperationError`; other values are opaque and follow the
-conversion rules above. This validation applies to all write helpers. To
-intentionally write an error report, first format the error as a string, such as
+conversion rules above. The sparse builder deliberately omits typed error
+cells and failed rows so that a partial matrix can be written. To intentionally
+write an error report, first format the error as a string, such as
 `f"[{error.code}] {error.message}"`.
 
 Matrix operations use one outer result slot per element and one inner slot per
 property. For two elements and three properties, the result write returns two
 rows of three execution results, while the raising setter returns `6` if all
-writes succeed. Flat operations use one result slot per element. Every adapter
-validates outer and inner response cardinality, including empty input and
-zero-property matrix cases.
+writes succeed. Flat operations use one result slot per element. API response
+cardinality is defined by the generated API models; utilities focus on mapping
+those responses to the declared result shape.
 
 The following resolution, read, write, and metadata operations are methods on
 `api.utilities.property`. Payload builders and `get_possible_enum_values` remain
@@ -171,9 +172,10 @@ module-level functions.
 * **Reading (2D Engine + 1D/Dict Conveniences):**
   * `get_property_values_per_element(...) -> list[list[str]]` / `..._result(...) -> BatchResult2D`
   * `get_flat_property_values(...) -> list[str]` / `..._result(...) -> BatchResult`
-  * `get_property_values_dict_per_element(...) -> list[dict[str, str]]`
+  * `get_property_values_dict_per_element(...) -> list[dict[str, str]]` / `..._result(...) -> BatchResult[dict[str, str]]`
 * **Writing (2D Engine + 1D Convenience):**
-  * `create_element_property_values` / `create_element_property_values_flat`: Pure payload builders converting primitives to CAD mutation models.
+  * `create_element_property_values` / `create_element_property_values_flat`: Pure dense payload builders converting primitives to CAD mutation models.
+  * `create_element_property_values_sparse`: Pure payload builder that derives coordinates from a matrix and omits failed rows/cells.
   * `set_property_values_per_element(...) -> int` / `..._result(...) -> BatchResult2D`
   * `set_flat_property_values(...) -> int` / `..._result(...) -> BatchResult`
 * **Inspection:**
@@ -187,7 +189,14 @@ module-level functions.
 
 `BatchResult[T]` is an immutable one-dimensional result. Each slot holds a successful value or a normalized `BatchError`; `iter_successes()` and `iter_errors()` provide its integer index. `BatchResult2D[T]` is an immutable ragged matrix. It stores the supplied length for each row, including a whole-row error. Matrix errors are located at `(row, column)` or `(row, None)`. Successful values are opaque; only the result's declared slots are interpreted as outcomes.
 
-`map()` transforms only successful slots and lets callback exceptions propagate. `flatten()` preserves row-major cell coordinates. Its ordinary form returns a flat `BatchResult`; `skip_errors=True` returns successful values and coordinates and permits whole-row errors.
+`map()` transforms only successful slots and lets callback exceptions propagate.
+`BatchResult2D.flatten()` returns a flat `BatchResult` in row-major order and
+retains cell errors. A whole-row error cannot be flattened and raises a
+`ValueError`. `flatten_successes()` and `coordinates()` share one filtering
+policy: they omit whole-row and cell errors, and their results are aligned by
+position. `BatchResult.successes` is a concrete list for convenient scripting.
+Dictionary row failures are represented by one aggregate `BatchError` with
+code `-1`; its `causes` retain the original cell or row errors for logging.
 
 ```python
 result = api.utilities.property.get_flat_property_values_result(elements, property_id)
@@ -197,25 +206,31 @@ for element_index, error in result.iter_errors():
     print(element_index, error.code, error.message)
 ```
 
-A partial matrix copy sends only successful cells while preserving their input coordinates:
+A partial matrix copy sends only successful cells. The sparse builder derives
+the original element/property coordinates directly from the matrix:
 
 ```python
 run = BatchRun(elements)
 read = api.utilities.property.get_property_values_per_element_result(elements, source_properties)
 run.record("read", read)
-values, coords = read.flatten(skip_errors=True)
-payload = create_element_property_values_from_coords(elements, target_properties, coords, values)
+payload = create_element_property_values_sparse(elements, target_properties, read)
 write = BatchResult.from_items(api.tapir.property.set_property_values_of_elements(payload))
-run.record("copy", write, item_indices=[row for row, _ in coords], details=coords)
-outcomes = run.finish()
+coordinates = read.coordinates()
+run.record(
+    "copy",
+    write,
+    item_indices=[row for row, _ in coordinates],
+    details=coordinates,
+)
+report = run.finish()
 ```
 
-`BatchRun` accumulates step failures against the original items. Before `finish()`, error-free items are incomplete; `finish()` marks them succeeded and closes the run. `abort(exception)` closes the run with a fatal error and leaves otherwise clean items incomplete. Start a new `BatchRun` for an explicit retry; completed runs never replace or erase earlier outcomes.
+`BatchRun` accumulates step failures against the original items. `run.report` is an immutable snapshot that contains the item outcomes, recorded steps, overall `BatchStatus`, and optional fatal exception. Before `finish()`, error-free items are incomplete; `finish()` marks them succeeded and closes the run. `abort(exception)` closes the run with overall status `BatchStatus.FAILED`, preserves the fatal exception in `report.fatal_error`, and leaves otherwise clean items incomplete. Start a new `BatchRun` for an explicit retry; completed runs never replace or erase earlier outcomes.
 
 ```python
 terminal_codes = {4010}  # The application decides which API errors are terminal.
 retry_items = []
-for outcome in outcomes:
+for outcome in report.outcomes:
     if outcome.succeeded:
         accept(outcome.original_item)
     elif any(failure.error.code in terminal_codes for failure in outcome.failures):
@@ -227,7 +242,11 @@ retry = BatchRun(retry_items)
 # Record fresh retry steps on `retry`; the completed run remains unchanged.
 ```
 
-The recursive scanner, `root_key`, `items_or`, masks/filtering helpers, `realign`, `zip`, caught calculation errors, diagnostic dictionary result methods, and retry/history replacement were removed. A future UI can show consolidated outcome counts first, then expandable step and coordinate-level failure details.
+The recursive scanner, `root_key`, `items_or`, masks/filtering helpers,
+`realign`, `zip`, caught calculation errors, and retry/history replacement were
+removed. Dictionary diagnostics use one aggregate error per failed row while
+the matrix result retains cell-level detail. A future UI can show consolidated
+outcome counts first, then expandable step and coordinate-level failure details.
 
 ---
 
@@ -238,11 +257,14 @@ Tests run offline with real official and Tapir Pydantic models and mocked API re
 ```text
 tests/utilities/unit/
 ├── test_identifiers.py
-├── test_batch_results_v2.py  # 1D/2D result and BatchRun contracts
-└── test_properties_v2.py     # payloads, cardinality, and partial-copy pipeline
+├── test_batch_results.py     # 1D/2D result and BatchRun contracts
+└── test_properties.py        # payloads, row aggregation, and partial-copy pipeline
 ```
 
-The result tests cover direct typed errors, ragged and whole-row matrix failures, flattening, mapping, outcome closure, and atomic recording. Property tests cover scalar and matrix response cardinality, dictionary fail-fast behavior, sparse coordinate payloads, and partial writes.
+The result tests cover direct typed errors, ragged and whole-row matrix failures,
+shared flatten filtering, mapping, outcome closure, and atomic recording.
+Property tests cover dense and sparse payloads, row-atomic dictionary errors,
+and partial writes.
 
 ---
 

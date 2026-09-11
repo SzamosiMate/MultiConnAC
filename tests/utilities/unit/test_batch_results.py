@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from multiconn_archicad.models.tapir import types as tapir
-from multiconn_archicad.utilities import BatchResult, BatchResult2D, BatchRun
+from multiconn_archicad.utilities import BatchReport, BatchResult, BatchResult2D, BatchRun, BatchStatus
 
 
 def error(code: int = 1):
@@ -12,7 +12,10 @@ def error(code: int = 1):
 
 def test_one_dimensional_slots_allow_none_and_expose_indices():
     result = BatchResult.from_items([None, error()])
-    assert result.successes == (None,)
+    assert result.successes == [None]
+    assert result.slots[0].success_value is None
+    with pytest.raises(ValueError, match="successful value"):
+        result.slots[1].success_value
     assert result.success_indices == (0,)
     assert result.failure_indices == (1,)
     assert [(index, item.code) for index, item in result.iter_errors()] == [(1, 1)]
@@ -26,7 +29,7 @@ def test_error_normalization_preserves_typed_api_error_identity(item):
 
 def test_one_dimensional_map_skips_error_and_propagates_callback_exception():
     result = BatchResult.from_items(["ok", error()])
-    assert result.map(str.upper).successes == ("OK",)
+    assert result.map(str.upper).successes == ["OK"]
     with pytest.raises(ZeroDivisionError):
         BatchResult.from_items(["ok"]).map(lambda _: 1 / 0)
 
@@ -37,7 +40,8 @@ def test_matrix_retains_ragged_lengths_and_whole_row_error_coordinate():
     assert list(result.iter_errors())[0][0] == (1, None)
     with pytest.raises(ValueError):
         result.flatten()
-    assert result.flatten(skip_errors=True) == (("a",), ((0, 0),))
+    assert result.flatten_successes() == ["a"]
+    assert result.coordinates() == ((0, 0),)
 
 
 def test_matrix_supports_empty_matrix_empty_rows_and_cell_errors():
@@ -49,13 +53,14 @@ def test_matrix_supports_empty_matrix_empty_rows_and_cell_errors():
     assert [coordinate for coordinate, _ in mixed.iter_errors()] == [(0, 0), (1, None)]
 
 
-def test_matrix_map_and_flatten_are_success_only_and_row_major():
+def test_matrix_map_and_flatten_share_row_major_filtering():
     result = BatchResult2D.from_rows([["a", error()], ["b"]], row_lengths=[2, 1])
     mapped = result.map(str.upper)
-    flat, coordinates = mapped.flatten()
-    assert flat.successes == ("A", "B")
+    flat = mapped.flatten()
+    assert flat.successes == ["A", "B"]
     assert flat.failure_indices == (1,)
-    assert coordinates == ((0, 0), (0, 1), (1, 0))
+    assert mapped.flatten_successes() == ["A", "B"]
+    assert mapped.coordinates() == ((0, 0), (1, 0))
     with pytest.raises(ZeroDivisionError):
         BatchResult2D.from_rows([["a"]], row_lengths=[1]).map(lambda _: 1 / 0)
 
@@ -65,8 +70,17 @@ def test_batch_run_records_one_dimensional_errors_and_preserves_repeated_step_na
     first = BatchResult.from_items(["ok", error()])
     assert run.record("write", first) is first
     run.record("write", BatchResult.from_items(["ok", error(2)]), item_indices=[1, 0])
-    assert run.failed_indices == (0, 1)
+    assert run.report.failed_indices == (0, 1)
     assert {failure.step.index for outcome in run.outcomes for failure in outcome.failures} == {0, 1}
+
+
+def test_batch_run_dataclass_normalizes_original_items_and_hides_internal_state():
+    source = ["a"]
+    run = BatchRun(source)
+    source.append("later")
+    assert run.original_items == ("a",)
+    with pytest.raises(TypeError):
+        BatchRun(["a"], _steps=[])
 
 
 def test_batch_run_record_validation_is_atomic_and_abort_keeps_clean_items_incomplete():
@@ -74,10 +88,12 @@ def test_batch_run_record_validation_is_atomic_and_abort_keeps_clean_items_incom
     with pytest.raises(ValueError):
         run.record("short", BatchResult.from_items([error()]))
     assert run.steps == ()
-    run.abort(RuntimeError("fatal"))
-    assert isinstance(run.fatal_error, RuntimeError)
-    assert run.incomplete_indices == (0, 1)
-    assert run.status_counts == {"total": 2, "failed": 0, "succeeded": 0, "incomplete": 2}
+    report = run.abort(RuntimeError("fatal"))
+    assert isinstance(report, BatchReport)
+    assert isinstance(report.fatal_error, RuntimeError)
+    assert report.status is BatchStatus.FAILED
+    assert report.incomplete_indices == (0, 1)
+    assert report.status_counts == {"total": 2, "failed": 0, "succeeded": 0, "incomplete": 2}
     with pytest.raises(RuntimeError):
         run.finish()
 
@@ -93,10 +109,12 @@ def test_batch_run_2d_details_and_multiple_failures_are_ordered_per_outcome():
 
 
 def test_finish_marks_clean_success_and_empty_run_is_clean():
-    assert BatchRun([]).finish() == ()
+    empty_report = BatchRun([]).finish()
+    assert empty_report.outcomes == ()
+    assert empty_report.status is BatchStatus.SUCCEEDED
     run = BatchRun(["only"])
     run.record("read", BatchResult.from_items(["ok"]))
-    assert run.finish()[0].succeeded
+    assert run.finish().outcomes[0].succeeded
     with pytest.raises(RuntimeError):
         run.record("retry", BatchResult.from_items(["ok"]))
 
@@ -116,11 +134,27 @@ def test_run_repeated_targets_and_invalid_arguments_are_atomic():
 def test_run_finish_and_abort_statuses_and_separate_retry():
     run = BatchRun(["a", "b"])
     run.record("write", BatchResult.from_items([error(), "ok"]))
-    assert [outcome.status for outcome in run.finish()] == ["failed", "succeeded"]
+    report = run.finish()
+    assert [outcome.status for outcome in report.outcomes] == [BatchStatus.FAILED, BatchStatus.SUCCEEDED]
+    assert report.status is BatchStatus.FAILED
     aborted = BatchRun(["a", "b"])
     aborted.record("write", BatchResult.from_items([error(), "ok"]))
-    assert [outcome.status for outcome in aborted.abort(RuntimeError("fatal"))] == ["failed", "incomplete"]
+    aborted_report = aborted.abort(RuntimeError("fatal"))
+    assert [outcome.status for outcome in aborted_report.outcomes] == [BatchStatus.FAILED, BatchStatus.INCOMPLETE]
+    assert aborted_report.status is BatchStatus.FAILED
     with pytest.raises(RuntimeError):
         aborted.abort(RuntimeError("again"))
     retry = BatchRun(["a"])
-    assert retry.finish()[0].succeeded
+    assert retry.finish().outcomes[0].succeeded
+
+
+def test_batch_run_report_is_a_snapshot_and_tracks_open_state():
+    run = BatchRun(["a"])
+    before = run.report
+    assert before.status is BatchStatus.INCOMPLETE
+    run.record("read", BatchResult.from_items([error()]))
+    after = run.report
+    assert before.outcomes[0].status is BatchStatus.INCOMPLETE
+    assert before.steps == ()
+    assert after.status is BatchStatus.FAILED
+    assert len(after.steps) == 1

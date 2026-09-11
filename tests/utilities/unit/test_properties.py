@@ -12,10 +12,10 @@ from multiconn_archicad.utilities.properties import (
     PropertyUtilities,
     create_element_property_values,
     create_element_property_values_flat,
-    create_element_property_values_from_coords,
+    create_element_property_values_sparse,
     get_possible_enum_values,
 )
-from multiconn_archicad.utilities.results import BatchResult
+from multiconn_archicad.utilities.results import BatchResult, BatchResult2D
 from multiconn_archicad.utilities import BatchRun
 
 
@@ -27,30 +27,40 @@ def _error() -> tapir.ErrorItem:
     return tapir.ErrorItem(error=tapir.Error(code=7, message="bad"))
 
 
-def test_payload_builders_and_sparse_coordinates_validate_shape_and_duplicates():
+def test_payload_builders_and_sparse_matrix_omit_failed_cells():
     elements, properties = [uuid4(), uuid4()], [uuid4(), uuid4()]
     assert len(create_element_property_values(elements, properties, [["a", None], [0, False]])) == 4
     assert len(create_element_property_values_flat(elements, properties[0], ["a", "b"])) == 2
-    sparse = create_element_property_values_from_coords(elements, properties, [(1, 0)], ["x"])
-    assert sparse[0].elementId.guid == elements[1]
-    with pytest.raises(ValueError):
-        create_element_property_values_from_coords(elements, properties, [(0, 0), (0, 0)], ["a", "b"])
-    with pytest.raises(IndexError):
-        create_element_property_values_from_coords(elements, properties, [(2, 0)], ["a"])
+    sparse = create_element_property_values_sparse(elements, properties, [[_error(), "x"], ["y", _error()]])
+    assert len(sparse) == 2
+    assert sparse[0].elementId.guid == elements[0]
+    assert sparse[1].elementId.guid == elements[1]
+
+    matrix = BatchResult2D.from_rows([["a", _error()], _error()], row_lengths=[2, 2])
+    sparse_from_result = create_element_property_values_sparse(elements, properties, matrix)
+    assert len(sparse_from_result) == 1
+    assert sparse_from_result[0].elementId.guid == elements[0]
 
 
-def test_matrix_read_preserves_cell_error_and_dictionary_is_fail_fast():
+def test_matrix_read_preserves_cell_error_and_dictionary_aggregates_failed_rows():
     api = MagicMock()
     api.tapir.property.get_property_values_of_elements.return_value = [
-        tapir.PropertyValuesArrayItem(propertyValues=[_value("a"), _error()])
+        tapir.PropertyValuesArrayItem(propertyValues=[_error(), _error()]),
+        tapir.PropertyValuesArrayItem(propertyValues=[_value("b"), _value("c")]),
     ]
     utilities = PropertyUtilities(api)
-    result = utilities.get_property_values_per_element_result([uuid4()], [uuid4(), uuid4()])
-    assert list(result.iter_errors())[0][0] == (0, 1)
+    elements, properties = [uuid4(), uuid4()], [uuid4(), uuid4()]
+    result = utilities.get_property_values_per_element_result(elements, properties)
+    assert list(result.iter_errors())[0][0] == (0, 0)
+
+    dictionary_result = utilities.get_property_values_dict_per_element_result(elements, properties, ["a", "b"])
+    assert dictionary_result.successes == [{"a": "b", "b": "c"}]
+    assert len(dictionary_result.errors[0].causes) == 2
+    assert "contains 2 error(s)" in dictionary_result.errors[0].message
     with pytest.raises(BatchOperationError):
-        utilities.get_property_values_dict_per_element([uuid4()], [uuid4(), uuid4()], ["a", "b"])
+        utilities.get_property_values_dict_per_element(elements, properties, ["a", "b"])
     with pytest.raises(ValueError):
-        utilities.get_property_values_dict_per_element([uuid4()], [uuid4()], ["a", "b"])
+        utilities.get_property_values_dict_per_element(elements, properties, ["a"])
 
 
 def test_row_error_and_partial_copy_pipeline_keep_other_cells_writable():
@@ -64,44 +74,16 @@ def test_row_error_and_partial_copy_pipeline_keep_other_cells_writable():
     assert [coordinate for coordinate, _ in read.iter_errors()] == [(0, 1), (1, None)]
     run = BatchRun(elements)
     run.record("read", read)
-    values, coordinates = read.flatten(skip_errors=True)
-    payload = create_element_property_values_from_coords(elements, properties, coordinates, values)
+    coordinates = read.coordinates()
+    payload = create_element_property_values_sparse(elements, properties, read)
     assert len(payload) == 1
     api.tapir.property.set_property_values_of_elements.return_value = [tapir.SuccessfulExecutionResult(success=True)]
     write = BatchResult.from_items(api.tapir.property.set_property_values_of_elements(payload))
     run.record("copy", write, item_indices=[row for row, _ in coordinates], details=coordinates)
-    outcomes = run.finish()
-    assert outcomes[0].failed
-    assert outcomes[1].failed
+    report = run.finish()
+    assert report.outcomes[0].failed
+    assert report.outcomes[1].failed
     assert api.tapir.property.set_property_values_of_elements.call_count == 1
-
-
-def test_property_response_cardinality_is_checked_before_result_conversion():
-    api = MagicMock()
-    api.tapir.property.get_property_values_of_elements.return_value = []
-    utilities = PropertyUtilities(api)
-    with pytest.raises(ValueError, match="returned 0"):
-        utilities.get_flat_property_values_result([uuid4()], uuid4())
-    api.tapir.property.set_property_values_of_elements.return_value = []
-    with pytest.raises(ValueError, match="expected 1"):
-        utilities.set_flat_property_values_result([uuid4()], uuid4(), ["x"])
-
-
-def test_id_details_and_matrix_cardinality_checks_include_inner_rows():
-    api = MagicMock()
-    utilities = PropertyUtilities(api)
-    user_id = official.UserDefinedPropertyUserId(localizedName=["Group", "Name"])
-    api.official.property.get_property_ids.return_value = []
-    with pytest.raises(ValueError, match="expected 1"):
-        utilities.resolve_property_ids_result([user_id])
-    api.official.property.get_details_of_properties.return_value = []
-    with pytest.raises(ValueError, match="expected 1"):
-        utilities.get_property_details_result([uuid4()])
-    api.tapir.property.get_property_values_of_elements.return_value = [
-        tapir.PropertyValuesArrayItem(propertyValues=[_value("only")])
-    ]
-    with pytest.raises(ValueError, match="does not match"):
-        utilities.get_property_values_per_element_result([uuid4()], [uuid4(), uuid4()])
 
 
 def test_matrix_write_uses_2d_result_and_zero_property_cardinality():

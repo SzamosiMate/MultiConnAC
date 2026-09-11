@@ -3,7 +3,15 @@
 from multiconn_archicad.errors import BatchOperationError
 
 from .api import Utilities
-from .batch_run import BatchFailure, BatchOutcome, BatchRun, BatchStep
+from .batch_run import (
+    BatchFailure,
+    BatchOutcome,
+    BatchReport,
+    BatchResultType,
+    BatchRun,
+    BatchStatus,
+    BatchStep,
+)
 from .results import BatchError, BatchResult, BatchResult2D
 
 __all__ = [
@@ -16,4 +24,7 @@ __all__ = [
     "BatchStep",
     "BatchFailure",
     "BatchOutcome",
+    "BatchReport",
+    "BatchStatus",
+    "BatchResultType",
 ]
