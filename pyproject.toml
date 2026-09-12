@@ -1,6 +1,6 @@
 [project]
 name = "multiconn_archicad"
-version = "0.8.1"
+version = "0.8.2"
 description = "A powerful Python toolkit for multi-instance Archicad automation, supporting the official JSON API and the Tapir Add-On."
 readme = "README.md"
 authors = [
@@ -24,6 +24,7 @@ requires-python = ">=3.12, <3.15"
 dependencies = [
     "archicad>=28.3000",
     "httpx>=0.28.1",
+    "packaging>=24.0",
     "psutil>=6.1.1, <8.0",
     "pydantic>=2.12.0, <3.0",
     "typing-extensions>=4.12.2",
