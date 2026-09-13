@@ -157,8 +157,6 @@ class FileAssembler:
             "if TYPE_CHECKING:",
             "    from multiconn_archicad.core.core_commands import CoreCommands",
             "",
-            f'SUPPORTED_TAPIR_VERSION = "{tapir_paths.tapir_version}"',
-            "",
             container_classes[0],
             "",
             "",

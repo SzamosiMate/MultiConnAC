@@ -215,6 +215,7 @@ def apply_permanent_patches(master_defs: dict[str, Any]):
     # the MeshWithDetails wrapper (extracted above) carries the actual data in 'meshData'.
     extract_inline_schema(master_defs, "MeshWithDetails", ["meshData"], "MeshModificationData")
 
+    extract_inline_schema(master_defs,"RevisionCustomSchemeData",["items"],"RevisionCustomSchemeEntry")
 
 def apply_temporary_patches(master_defs: dict[str, Any]):
     """

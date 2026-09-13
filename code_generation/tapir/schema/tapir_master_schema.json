@@ -6058,20 +6058,7 @@
     "RevisionCustomSchemeData": {
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "customSchemeKey": {
-            "$ref": "#/$defs/Guid"
-          },
-          "customSchemeValue": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "customSchemeKey",
-          "customSchemeValue"
-        ]
+        "$ref": "#/$defs/RevisionCustomSchemeEntry"
       }
     },
     "DocumentRevisionReference": {
@@ -18380,6 +18367,22 @@
         }
       },
       "additionalProperties": false
+    },
+    "RevisionCustomSchemeEntry": {
+      "type": "object",
+      "properties": {
+        "customSchemeKey": {
+          "$ref": "#/$defs/Guid"
+        },
+        "customSchemeValue": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "customSchemeKey",
+        "customSchemeValue"
+      ]
     },
     "WallStructureType": {
       "type": "string",

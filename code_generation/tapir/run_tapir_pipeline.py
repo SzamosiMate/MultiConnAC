@@ -13,7 +13,7 @@ from code_generation.tapir.paths import tapir_paths
 from multiconn_archicad.constants import SUPPORTED_TAPIR_VERSION
 
 
-CONSTANTS_FILE = getattr(tapir_paths, "CONSTANTS_FILE", project_root / "multiconn_archicad" / "constants.py")
+CONSTANTS_FILE = getattr(tapir_paths, "CONSTANTS_FILE", project_root / "src" / "multiconn_archicad" / "constants.py")
 
 
 # Sequence of modules to execute
@@ -26,6 +26,7 @@ STEPS = [
     ("Model Splitter (TypedDicts)", "code_generation.tapir.model_generators.07_split_typed_dicts"),
     ("Generate Model Tests", "code_generation.tapir.model_generators.08_generate_model_tests"),
     ("Ruff Formatting Pipeline", "code_generation.tapir.model_generators.09_run_formatter"),
+    ("Generation Audit", "code_generation.tapir.generation_audit"),
 ]
 
 

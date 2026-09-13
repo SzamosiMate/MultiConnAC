@@ -1,4 +1,5 @@
 import pathlib
+from multiconn_archicad.constants import SUPPORTED_TAPIR_VERSION
 
 class TapirApiPaths:
 
@@ -42,18 +43,12 @@ class TapirApiPaths:
     GENERATED_TESTS_OUTPUT = TESTS_DIR / "test_generated_tapir_models.py"
 
     @property
-    def tapir_version(self) -> str:
-        """Reads the pinned version from the text file."""
-        version_file = self.PROJECT_ROOT / "TAPIR_VERSION"
-        return version_file.read_text().strip() if version_file.exists() else "main"
-
-    @property
     def COMMAND_DEFS_URL(self) -> str:
-        return f"https://raw.githubusercontent.com/ENZYME-APD/tapir-archicad-automation/refs/tags/{self.tapir_version}/docs/archicad-addon/command_definitions.js"
+        return f"https://raw.githubusercontent.com/ENZYME-APD/tapir-archicad-automation/refs/tags/{SUPPORTED_TAPIR_VERSION}/docs/archicad-addon/command_definitions.js"
 
     @property
     def COMMON_SCHEMA_URL(self) -> str:
-        return f"https://raw.githubusercontent.com/ENZYME-APD/tapir-archicad-automation/refs/tags/{self.tapir_version}/docs/archicad-addon/common_schema_definitions.js"
+        return f"https://raw.githubusercontent.com/ENZYME-APD/tapir-archicad-automation/refs/tags/{SUPPORTED_TAPIR_VERSION}/docs/archicad-addon/common_schema_definitions.js"
 
     @classmethod
     def create_directories(cls):
